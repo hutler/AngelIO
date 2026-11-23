@@ -2,3 +2,4 @@
 *.umap binary
 *.uasset binary
 *.lib binary
+*.pdf binary

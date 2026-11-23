@@ -4,6 +4,13 @@ AngelIO is an Unreal Engine plugin for writing level logic in AngelScript. A mis
 
 For LLM agents and contributors, the [agent guide](Docs/AgentGuide.md) walks through a mission change, a native async operation, and a listen-server investigation with MCP and the PIE inspector. [Repository workflow](AGENTS.md)
 
+## Illustrated user handbooks
+
+| Handbook | English PDF | Русский PDF |
+| --- | --- | --- |
+| Engineers · Build the plugin, expose a typed operation, and trace a networked ride | [Engineering handbook](Docs/Guides/Engineering-EN.pdf) | [Для инженеров](Docs/Guides/Engineering-RU.pdf) |
+| Level designers · Tune the two-lift map, wire a Blueprint button, and playtest with a client | [Level design handbook](Docs/Guides/Level-Design-EN.pdf) | [Для левел-дизайнеров](Docs/Guides/Level-Design-RU.pdf) |
+
 ## Run the two-lift demo
 
 Open [AngelIO.uproject](AngelIO.uproject) with Unreal Engine 5.8, build the C++ modules if prompted, and press **Play** on the default map, `/Game/Demo/TwoLifts`. Each platform runs its own instance of `Elevator.as`. The lifts start on floor 1 and travel to floors 2 and 3. Each floor is 200 cm apart and the default speed is 240 cm/s.
