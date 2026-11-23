@@ -13,8 +13,8 @@ namespace
     }
 }
 
-FLiftTrip::FLiftTrip(UWorld* World, const FString& Target, int32 InFloor, float Speed) :
-    FAngelIOOperation(World, TEXT("Lift.MoveTo"), Target, TripArguments(InFloor, Speed)), Floor(InFloor)
+FLiftTrip::FLiftTrip(UWorld* World, const FString& Target, int32 InFloor, float Speed, const UObject* TraceTarget) :
+    FAngelIOOperation(World, TEXT("Lift.MoveTo"), Target, TripArguments(InFloor, Speed), TraceTarget), Floor(InFloor)
 {}
 
 void FLiftTrip::Finish(ELiftTripStatus InStatus, const FString& Reason)

@@ -52,6 +52,18 @@ struct FAngelIOEvent
 
 enum class EAngelIOState { Empty, Compiled, Running, Waiting, Finished, Failed };
 
+#if WITH_EDITOR
+struct FAngelIOMissionInspection
+{
+    EAngelIOState State = EAngelIOState::Empty;
+    FString Script;
+    int32 Line = 0;
+    FString Waiting;
+    FGuid Instance;
+    FGuid Operation;
+};
+#endif
+
 // Game-thread instance. Compile inspects declarations without running script code.
 class ANGELIO_API FAngelIOProgram
 {
@@ -75,6 +87,9 @@ public:
     TArray<FAngelIOEvent> TakeEvents();
     EAngelIOState State() const;
     FString WaitingFor() const;
+#if WITH_EDITOR
+    FAngelIOMissionInspection InspectMission() const;
+#endif
 
 private:
     struct FImpl;

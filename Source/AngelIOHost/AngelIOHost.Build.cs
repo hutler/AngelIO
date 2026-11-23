@@ -8,6 +8,6 @@ public class AngelIOHost : ModuleRules
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "AngelIO" });
         PrivateDependencyModuleNames.Add("Json");
         if (Target.bBuildEditor)
-            PrivateDependencyModuleNames.Add("UnrealEd");
+            PrivateDependencyModuleNames.AddRange(new[] { "UnrealEd", "AngelIOEditor", "Slate", "SlateCore" });
     }
 }

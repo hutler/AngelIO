@@ -30,7 +30,8 @@ class ANGELIO_API FAngelIOOperation
 {
 public:
     explicit FAngelIOOperation(UWorld* World = nullptr, const FString& Name = TEXT("Operation"),
-        const FString& Target = {}, TSharedPtr<FJsonObject> Arguments = nullptr);
+        const FString& Target = {}, TSharedPtr<FJsonObject> Arguments = nullptr, const UObject* TraceTarget = nullptr);
+    ~FAngelIOOperation();
     FAngelIOOperation(const FAngelIOOperation&) = delete;
     FAngelIOOperation& operator=(const FAngelIOOperation&) = delete;
     const FGuid& GetOperationId() const { return OperationId; }
@@ -43,5 +44,8 @@ private:
     TSharedPtr<FJsonObject> AddEvent(const TCHAR* Type) const;
     FGuid OperationId;
     TWeakObjectPtr<UAngelIOTraceSubsystem> Trace;
+#if WITH_EDITOR
+    TWeakObjectPtr<const UObject> InspectionTarget;
+#endif
     bool bComplete = false;
 };

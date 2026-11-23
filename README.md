@@ -114,6 +114,18 @@ The server runs the missions and resolves named targets. Enable **Replicates** o
 
 In the demo, the player's controller sends the request to the server. `LiftFloor 4` and the Blueprint call `ServerRequestLiftFloor(4)` both reach the group through `LiftPanel.as`. The typed `LiftTrip` console command accepts floors 1–8 and speeds up to 2000 cm/s. Each game's module controls which commands and arguments players may send. [Demo controller](Source/AngelIOHost/AngelIOPlayerController.cpp)
 
+## Inspect a mission during PIE
+
+Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the demo with **Play As Listen Server**, two players and **Run Under One Process**. Wait for the initial rides to finish, then enter `LiftTrip 6 100` in the client's console.
+
+1. Select the **Listen server** world and the remote player's **TripPanel** mission. The inspector shows the source file and line of the current wait, its signal or operation name, and the ID of the awaited ride.
+2. Select **FreightLift / Mission**. Its script waits for `MotionFinished` in `Elevator.as`. The operation history follows the same ride that the panel is waiting for. The list includes call arguments, caller and waiter sites, completion status, rejection or cancellation reason, and resumption.
+3. Use the operation picker to pin an earlier ride. Its history remains visible as the live mission advances. Choose **Follow current or latest operation** to resume automatic selection.
+
+The mission picker lists scripted components in the selected world, including multiple panels on one controller. It groups missions on the selected Outliner actor when its counterpart is available. Selecting a client replica shows its replicated wait alongside the live server VM when the editor can resolve the replica through the in-process IP NetDriver's NetGUID cache. With an external server or another replication backend the client view shows the replicated wait. Select the authoritative PIE world for full inspection.
+
+The tab reads the world's in-memory trace. The timeline reports when older events have been discarded. Game modules can pass the executing component or actor as the optional `TraceTarget` argument to `FAngelIOOperation` to associate calls with the exact selected target, including after a rename. Debug data stays local to the editor process.
+
 ## Trace a ride on a listen server
 
 1. Start the demo in PIE as a listen server with a connected player. Wait for the initial rides to finish. From the client's console, enter `LiftTrip 6 400`.
@@ -169,12 +181,13 @@ $editor = 'E:/DEV/UEBASE/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe'
 & $editor "$PWD/AngelIO.uproject" -run=AngelIOCheck -Script=Elevator.as "-Report=$env:TEMP/angelio.json" -unattended -nullrhi -ddc=InstalledNoZenLocalFallback
 ```
 
-Run the `AngelIO.` filter in Unreal Automation for the full regression suite. The `AngelIO.Network.ListenServer` filter selects two PIE tests.
+Run the `AngelIO.` filter in Unreal Automation for the full regression suite. The `AngelIO.Network.ListenServer` filter selects the networked PIE tests.
 
 | Test | What it checks |
 | --- | --- |
 | `NamedGroupAndLateJoin` | Starts a host and client using the IP NetDriver, calls the lift group, and connects a second client after the ride to check the replicated state. |
 | `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
+| `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.
 

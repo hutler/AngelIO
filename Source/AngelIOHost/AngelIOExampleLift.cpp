@@ -45,7 +45,7 @@ bool AAngelIOExampleLift::RequestFloor(int32 Floor)
 TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed, FName Target)
 {
     if (Target.IsNone()) Target = Address->GetTargetName();
-    auto Trip = MakeShared<FLiftTrip>(GetWorld(), Target.IsNone() ? GetName() : Target.ToString(), Floor, TravelSpeed);
+    auto Trip = MakeShared<FLiftTrip>(GetWorld(), Target.IsNone() ? GetName() : Target.ToString(), Floor, TravelSpeed, Mission);
     const TCHAR* Rejection = nullptr;
     if (!HasAuthority() || GetNetMode() == NM_Client) Rejection = TEXT("NoAuthority");
     else if (ActiveTrip || Mission->GetWaitingSignal() == TEXT("MotionFinished")) Rejection = TEXT("LiftBusy");

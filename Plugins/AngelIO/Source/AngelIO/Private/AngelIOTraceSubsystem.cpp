@@ -16,7 +16,7 @@ bool UAngelIOTraceSubsystem::ShouldCreateSubsystem(UObject* Outer) const
         (World->WorldType == EWorldType::Game || World->WorldType == EWorldType::PIE);
 }
 
-TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId, const TCHAR* EventType)
+TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId, const TCHAR* EventType, const UObject* Target)
 {
     check(IsInGameThread());
     if (!SessionId.IsValid())
@@ -31,8 +31,15 @@ TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId,
     Event->SetNumberField(TEXT("worldSeconds"), GetWorld()->GetTimeSeconds());
     Event->SetStringField(TEXT("operationId"), OperationId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Event->SetStringField(TEXT("type"), EventType);
-    if (Events.Num() < Capacity) Events.Add(Event);
-    else Events[Total % Capacity] = Event;
+    FEntry Entry;
+    Entry.Json = Event;
+#if WITH_EDITOR
+    Entry.Target = Target;
+    if (Target && FCString::Strcmp(EventType, TEXT("call")) == 0) LiveTargets.Add(OperationId, Entry);
+    if (FCString::Strcmp(EventType, TEXT("complete")) == 0) LiveTargets.Remove(OperationId);
+#endif
+    if (Events.Num() < Capacity) Events.Add(MoveTemp(Entry));
+    else Events[Total % Capacity] = MoveTemp(Entry);
     ++Total;
     return Event;
 }
@@ -51,7 +58,7 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
     TArray<TSharedPtr<FJsonValue>> Ordered;
     Ordered.Reserve(Events.Num());
     for (int64 I = Total - Events.Num(); I < Total; ++I)
-        Ordered.Add(MakeShared<FJsonValueObject>(Events[I % Capacity]));
+        Ordered.Add(MakeShared<FJsonValueObject>(Events[I % Capacity].Json));
     Root->SetArrayField(TEXT("events"), MoveTemp(Ordered));
 
     FString Json;
@@ -84,6 +91,27 @@ void UAngelIOTraceSubsystem::Deinitialize()
     }
     Super::Deinitialize();
 }
+
+#if WITH_EDITOR
+void UAngelIOTraceSubsystem::VisitExecuting(const UObject* Component, const UObject* Actor,
+    TFunctionRef<void(const FJsonObject&)> Visitor) const
+{
+    check(IsInGameThread());
+    for (const auto& Pair : LiveTargets)
+        if (const auto* Target = Pair.Value.Target.Get(); Target && (Target == Component || Target == Actor))
+            Visitor(*Pair.Value.Json);
+}
+
+void UAngelIOTraceSubsystem::VisitEvents(TFunctionRef<void(const FJsonObject&, const UObject*)> Visitor) const
+{
+    check(IsInGameThread());
+    for (int64 I = Total - Events.Num(); I < Total; ++I)
+    {
+        const auto& Entry = Events[I % Capacity];
+        Visitor(*Entry.Json, Entry.Target.Get());
+    }
+}
+#endif
 
 static FAutoConsoleCommandWithWorld ExportTraceCommand(TEXT("AngelIO.ExportTrace"),
     TEXT("Export this world's operation history to Saved/AngelIO/Traces."),

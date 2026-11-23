@@ -18,7 +18,8 @@ namespace
 {
     struct FSharedAction : FAngelIOOperation
     {
-        explicit FSharedAction(UWorld* World = nullptr) : FAngelIOOperation(World, TEXT("Test.Action")) {}
+        explicit FSharedAction(UWorld* World = nullptr, const UObject* Target = nullptr) :
+            FAngelIOOperation(World, TEXT("Test.Action"), {}, nullptr, Target) {}
         void Finish() { MarkComplete(); }
     };
 
@@ -101,6 +102,7 @@ bool FAngelIOTraceRetention::RunTest(const FString&)
     FTestWorldWrapper Scene;
     if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
     UWorld* World = Scene.GetTestWorld();
+    FSharedAction LongRide(World, World);
     for (int32 I = 0; I < 2050; ++I)
     {
         FSharedAction Action(World);
@@ -112,12 +114,28 @@ bool FAngelIOTraceRetention::RunTest(const FString&)
     TSharedPtr<FJsonObject> Trace;
     if (!TestTrue(TEXT("Read bounded history"), FFileHelper::LoadFileToString(Text, *Path) &&
         FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Trace))) return false;
-    TestEqual(TEXT("Discarded prefix"), Trace->GetIntegerField(TEXT("droppedEvents")), 4);
+    TestEqual(TEXT("Discarded prefix"), Trace->GetIntegerField(TEXT("droppedEvents")), 5);
     const auto& Events = Trace->GetArrayField(TEXT("events"));
     TestEqual(TEXT("Bounded event count"), Events.Num(), 4096);
     for (int32 I = 0; I < Events.Num(); ++I)
-        if (!TestEqual(TEXT("Chronological after wrap"), Events[I]->AsObject()->GetIntegerField(TEXT("sequence")), I + 5))
+        if (!TestEqual(TEXT("Chronological after wrap"), Events[I]->AsObject()->GetIntegerField(TEXT("sequence")), I + 6))
             return false;
+#if WITH_EDITOR
+    auto LiveIds = [&]
+    {
+        TArray<FString> Ids;
+        World->GetSubsystem<UAngelIOTraceSubsystem>()->VisitExecuting(World, nullptr, [&](const FJsonObject& Call)
+        {
+            Ids.Add(Call.GetStringField(TEXT("operationId")));
+        });
+        return Ids;
+    };
+    TestTrue(TEXT("Executing trip remains inspectable after its call wraps"),
+        LiveIds().Contains(LongRide.GetOperationId().ToString(EGuidFormats::DigitsWithHyphensLower)));
+    LongRide.Finish();
+    { FSharedAction Abandoned(World, World); }
+    TestTrue(TEXT("Completed and released operations leave live target index"), LiveIds().IsEmpty());
+#endif
     return true;
 }
 #endif

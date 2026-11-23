@@ -53,9 +53,12 @@ namespace
 }
 
 FAngelIOOperation::FAngelIOOperation(UWorld* World, const FString& Name, const FString& Target,
-    TSharedPtr<FJsonObject> Arguments) : OperationId(FGuid::NewGuid())
+    TSharedPtr<FJsonObject> Arguments, const UObject* TraceTarget) : OperationId(FGuid::NewGuid())
 {
     check(IsInGameThread());
+#if WITH_EDITOR
+    InspectionTarget = TraceTarget;
+#endif
     if (!World) World = AngelIO::GetScriptWorld();
     if (!World || World->GetNetMode() == NM_Client) return;
     Trace = World->GetSubsystem<UAngelIOTraceSubsystem>();
@@ -73,9 +76,24 @@ FAngelIOOperation::FAngelIOOperation(UWorld* World, const FString& Name, const F
     }
 }
 
+FAngelIOOperation::~FAngelIOOperation()
+{
+#if WITH_EDITOR
+    if (!bComplete)
+        if (auto* Journal = Trace.Get()) Journal->ForgottenTargets += Journal->LiveTargets.Remove(OperationId);
+#endif
+}
+
 TSharedPtr<FJsonObject> FAngelIOOperation::AddEvent(const TCHAR* Type) const
 {
-    if (auto* Journal = Trace.Get()) return Journal->Append(OperationId, Type);
+    if (auto* Journal = Trace.Get())
+    {
+        const UObject* Target = nullptr;
+#if WITH_EDITOR
+        Target = InspectionTarget.Get();
+#endif
+        return Journal->Append(OperationId, Type, Target);
+    }
     return nullptr;
 }
 
@@ -131,6 +149,9 @@ struct FAngelIOProgram::FImpl
     TMap<int32, FString> Inputs, Outputs;
     TArray<FAngelIOEvent> Events;
     FExecutionScope Scope;
+#if WITH_EDITOR
+    FString ScriptSection;
+#endif
     TArray<FString> ExternalAPI;
     EAngelIOState Status = EAngelIOState::Empty;
     FString Waiting;
@@ -372,6 +393,9 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     Impl = MakeUnique<FImpl>();
     auto& S = *Impl;
     S.Engine = asCreateScriptEngine();
+#if WITH_EDITOR
+    S.ScriptSection = Label;
+#endif
     if (!S.Engine) return S.Fail(TEXT("Could not create AngelScript engine"));
     RegisterStdString(S.Engine);
     if (S.Engine->SetMessageCallback(asFUNCTION(FImpl::CompilerMessage), &S, asCALL_CDECL) < 0 ||
@@ -518,3 +542,28 @@ const TArray<FAngelIODiagnostic>& FAngelIOProgram::Diagnostics() const { return 
 TArray<FAngelIOEvent> FAngelIOProgram::TakeEvents() { return MoveTemp(Impl->Events); }
 EAngelIOState FAngelIOProgram::State() const { return Impl->Status; }
 FString FAngelIOProgram::WaitingFor() const { return Impl->Waiting; }
+
+#if WITH_EDITOR
+FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
+{
+    FAngelIOMissionInspection Info;
+    Info.State = Impl->Status;
+    Info.Script = Impl->ScriptSection;
+    Info.Instance = Impl->Scope.InstanceId;
+    if (Info.State != EAngelIOState::Waiting) return Info;
+    Info.Waiting = Impl->Waiting;
+    if (Impl->Scope.Pending) Info.Operation = Impl->Scope.Pending->GetOperationId();
+    // WaitFor has a generated wrapper. Report the first frame in the mission file.
+    for (asUINT Frame = 0; Frame < Impl->Context->GetCallstackSize(); ++Frame)
+    {
+        const char* Section = nullptr;
+        const int Line = Impl->Context->GetLineNumber(Frame, nullptr, &Section);
+        if (Line > 0 && Section && Info.Script.Equals(UTF8_TO_TCHAR(Section), ESearchCase::CaseSensitive))
+        {
+            Info.Line = Line;
+            break;
+        }
+    }
+    return Info;
+}
+#endif

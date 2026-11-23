@@ -146,6 +146,15 @@ void UAngelIOScriptComponent::FlushEvents()
     PublishState();
 }
 
+#if WITH_EDITOR
+FAngelIOMissionInspection UAngelIOScriptComponent::InspectMission() const
+{
+    auto Info = Program ? Program->InspectMission() : FAngelIOMissionInspection{};
+    if (Info.Script.IsEmpty()) Info.Script = Script;
+    return Info;
+}
+#endif
+
 void UAngelIOScriptComponent::DispatchPendingEvents()
 {
     TGuardValue<bool> Guard(bDispatching, true);

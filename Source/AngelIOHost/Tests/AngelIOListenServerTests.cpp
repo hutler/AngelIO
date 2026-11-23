@@ -6,6 +6,9 @@
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOTraceSubsystem.h"
+#include "SAngelIOMissionInspector.h"
+#include "Framework/Docking/TabManager.h"
+#include "Widgets/Docking/SDockTab.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonSerializer.h"
@@ -343,6 +346,91 @@ bool FAngelIOTypedListen::RunTest(const FString&)
         return true;
     });
     EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOInspectorPIE, "AngelIO.Network.ListenServer.MissionInspector",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOInspectorPIE::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    auto Tab = FGlobalTabmanager::Get()->TryInvokeTab(SAngelIOMissionInspector::TabId);
+    if (!TestTrue(TEXT("Open registered Mission Inspector tab"), Tab.IsValid())) return false;
+    auto Inspector = StaticCastSharedRef<SAngelIOMissionInspector>(Tab->GetContent());
+    const auto Ride = MakeShared<FString>();
+    auto WaitFor = ListenSteps(this);
+    StartListenSession();
+    WaitFor(TEXT("inspect idle lift and remote panel"), [this, Inspector]
+    {
+        UWorld* Host = FindPeer(NM_ListenServer);
+        UWorld* Client = FindPeer(NM_Client);
+        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(Client, 2, 2, 1)) return false;
+        auto* PC = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || PC->TripPanel->GetWaitingSignal() != TEXT("CallLift")) return false;
+        Inspector->SelectWorld(Host);
+        Inspector->SelectMission(FindLift(Host, 2)->Mission.Get());
+        TestEqual(TEXT("Signal wait skips generated API frame"), Inspector->Location, FString(TEXT("Elevator.as:18")));
+        TestEqual(TEXT("Signal name"), Inspector->Inspection.Waiting, FString(TEXT("RequestFloor")));
+        Inspector->SelectWorld(Client);
+        Inspector->SelectMission(PC->TripPanel.Get());
+        if (!Inspector->AuthorityMission.IsValid()) return false;
+        TestEqual(TEXT("Client panel maps to authoritative wait"), Inspector->Location, FString(TEXT("TypedLift.as:11")));
+        PC->LiftTrip(6, 200);
+        return true;
+    });
+    WaitFor(TEXT("inspect active trip from client panel and host lift"), [this, Inspector, Ride]
+    {
+        Inspector->Refresh();
+        if (!Inspector->Inspection.Operation.IsValid() || !Inspector->Origin.Contains(TEXT("LiftTrip.Wait"))) return false;
+        UWorld* Host = FindPeer(NM_ListenServer);
+        *Ride = Inspector->Inspection.Operation.ToString(EGuidFormats::DigitsWithHyphensLower);
+        TestEqual(TEXT("Operation wait site"), Inspector->Location, FString(TEXT("TypedLift.as:22")));
+        TestEqual(TEXT("Follow the exact awaited operation"), Inspector->DisplayedId, *Ride);
+        TestTrue(TEXT("Caller, waiter and arguments are visible"),
+            Inspector->Timeline.Contains(TEXT("TypedLift.as:21")) && Inspector->Timeline.Contains(TEXT("TypedLift.as:22")) &&
+            Inspector->Timeline.Contains(TEXT("FreightLift")) && Inspector->Timeline.Contains(TEXT("\"floor\":6")));
+        Inspector->SelectMission(FindLift(FindPeer(NM_Client), 2)->Mission.Get());
+        TestEqual(TEXT("Client lift maps to the same server trip"), Inspector->DisplayedId, *Ride);
+        TestEqual(TEXT("Client lift shows the server source line"), Inspector->Location, FString(TEXT("Elevator.as:25")));
+        Inspector->SelectWorld(Host);
+        Inspector->SelectMission(FindLift(Host, 3)->Mission.Get());
+        TestTrue(TEXT("Other lift has no history for this ride"), Inspector->Operations.IsEmpty());
+        Inspector->SelectMission(FindLift(Host, 2)->Mission.Get());
+        TestEqual(TEXT("Lift's physical wait site"), Inspector->Location, FString(TEXT("Elevator.as:25")));
+        TestEqual(TEXT("Same operation at the executor"), Inspector->DisplayedId, *Ride);
+        CastChecked<AAngelIOPlayerController>(Host->GetFirstPlayerController())->LiftTrip(7, 400);
+        Inspector->Refresh();
+        TestEqual(TEXT("A rejected call cannot replace the moving trip"), Inspector->DisplayedId, *Ride);
+        const auto* Rejected = Inspector->Operations.FindByPredicate([](const auto& Op){return Op.Status == TEXT("Rejected");});
+        if (!TestNotNull(TEXT("Rejected operation available in picker"), Rejected)) return true;
+        Inspector->SelectOperation(Rejected->Id);
+        TestTrue(TEXT("Historical result and reason visible"), Inspector->Timeline.Contains(TEXT("LiftBusy")));
+        Inspector->SelectOperation(*Ride);
+        return true;
+    });
+    WaitFor(TEXT("selected history survives completion"), [this, Inspector, Ride]
+    {
+        if (!AtFloor(FindPeer(NM_Client), 2, 6, 2)) return false;
+        Inspector->Refresh();
+        TestEqual(TEXT("Lift returned to input wait"), Inspector->Location, FString(TEXT("Elevator.as:18")));
+        TestEqual(TEXT("Pinned trip remains selected"), Inspector->DisplayedId, *Ride);
+        TestTrue(TEXT("Terminal result and resumed waiter visible"),
+            Inspector->Timeline.Contains(TEXT("Arrived")) && Inspector->Timeline.Contains(TEXT("RESUME")));
+        auto* Selected = FindLift(FindPeer(NM_ListenServer), 2);
+        Selected->Destroy();
+        Inspector->Refresh();
+        TestTrue(TEXT("Destroyed selection releases its history"), Inspector->DisplayedId.IsEmpty() && Inspector->Timeline.IsEmpty());
+        return true;
+    });
+    EndListenSession();
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Inspector, Tab]
+    {
+        Inspector->Refresh();
+        TestTrue(TEXT("PIE ended clears inspector"), !Inspector->World.IsValid() && Inspector->Location.IsEmpty());
+        Tab->RequestCloseTab();
+        return true;
+    }));
     return true;
 }
 #endif

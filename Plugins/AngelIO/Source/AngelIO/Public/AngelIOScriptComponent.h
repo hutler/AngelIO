@@ -81,6 +81,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category="AngelIO")
     FString GetWaitingSignal() const;
+#if WITH_EDITOR
+    FAngelIOMissionInspection InspectMission() const;
+#endif
 
 protected:
     virtual void BeginPlay() override;
