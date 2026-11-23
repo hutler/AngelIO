@@ -59,6 +59,45 @@ server.registerTool("read_script", {
   return result({ script: relative, source: await readFile(target, "utf8") });
 });
 
+const traceFilename = /^\d{8}-\d{6}-\d{3}-[a-f0-9]{32}\.json$/i;
+// FGuid uses 128 bits without RFC UUID version/variant constraints.
+const guid = z.string().regex(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
+const traceSchema = z.object({
+  schemaVersion: z.literal(1), sessionId: guid, world: z.string(), netMode: z.string(),
+  droppedEvents: z.number().int().nonnegative(), events: z.array(z.object({
+    sequence: z.number().int().positive(), operationId: guid, worldSeconds: z.number(),
+    type: z.enum(["call", "wait", "complete", "resume", "detach"])
+  }).passthrough())
+});
+
+server.registerTool("read_trace", {
+  description: "Read an exported operation history from Saved/AngelIO/Traces. Defaults to the latest export. Follow operationId from call to wait and completion. Reuse the returned trace filename when paging.",
+  inputSchema: {
+    trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
+    operationId: guid.optional(),
+    afterSequence: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(200).default(50)
+  }, annotations
+}, async ({ trace, operationId, afterSequence, limit }) => {
+  const directory = path.join(path.dirname(project), "Saved", "AngelIO", "Traces");
+  const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with operation events.";
+  let entries;
+  try { entries = await readdir(directory, { withFileTypes: true }); }
+  catch (error) { if (error.code === "ENOENT") throw new Error(noExports); throw error; }
+  const names = entries.filter(entry => entry.isFile() && traceFilename.test(entry.name)).map(entry => entry.name);
+  const filename = trace ?? names.sort().at(-1);
+  if (!filename) throw new Error(noExports);
+  if (!names.includes(filename)) throw new Error("Trace export not found: " + filename);
+  const target = await realpath(path.join(directory, filename));
+  if (path.relative(directory, target) !== filename) throw new Error("Trace resolves outside the project trace directory");
+  const { events, ...metadata } = traceSchema.parse(JSON.parse(await readFile(target, "utf8")));
+  const id = operationId?.toLowerCase();
+  const matches = events.filter(event => event.sequence > afterSequence && (!id || event.operationId === id));
+  const page = matches.slice(0, limit);
+  return result({ trace: filename, ...metadata, events: page,
+    nextAfterSequence: matches.length > limit ? page.at(-1).sequence : null });
+});
+
 server.registerTool("describe_api", {
   description: "Show the AngelIO entry point, variable conventions, VM calls and signal delivery rules.", annotations
 }, async () => {

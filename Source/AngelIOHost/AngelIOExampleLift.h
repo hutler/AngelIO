@@ -27,7 +27,7 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="Demo")
     bool RequestFloor(int32 Floor);
-    TSharedRef<FLiftTrip> MoveTo(int32 Floor, float TravelSpeed);
+    TSharedRef<FLiftTrip> MoveTo(int32 Floor, float TravelSpeed, FName Target = NAME_None);
 
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type Reason) override;

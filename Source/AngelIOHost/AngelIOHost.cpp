@@ -36,7 +36,12 @@ namespace
                 Engine.RegisterObjectBehaviour(Name, asBEHAVE_RELEASE, "void f()", asFUNCTION(Release), asCALL_GENERIC) >= 0;
         }
     };
-    using FLiftHandle = TScriptHandle<TWeakObjectPtr<AAngelIOExampleLift>>;
+    struct FNamedLift
+    {
+        TWeakObjectPtr<AAngelIOExampleLift> Actor;
+        FName Target;
+    };
+    using FLiftHandle = TScriptHandle<FNamedLift>;
     using FTripHandle = TScriptHandle<TSharedRef<FLiftTrip>>;
 
     void FindNamedLift(asIScriptGeneric* Call)
@@ -55,15 +60,18 @@ namespace
                 Match = Lift;
             }
         }
-        Call->SetReturnAddress(Match ? new FLiftHandle(Match) : nullptr);
+        Call->SetReturnAddress(Match ? new FLiftHandle({Match, FName(UTF8_TO_TCHAR(Name.c_str()))}) : nullptr);
     }
 
     void MoveLift(asIScriptGeneric* Call)
     {
-        auto* Lift = static_cast<FLiftHandle*>(Call->GetObject())->Value.Get();
+        const auto& Handle = static_cast<FLiftHandle*>(Call->GetObject())->Value;
+        auto* Lift = Handle.Actor.Get();
         const int32 Floor = static_cast<int32>(Call->GetArgDWord(0));
-        auto Trip = Lift ? Lift->MoveTo(Floor, Call->GetArgFloat(1)) : MakeShared<FLiftTrip>(Floor);
-        if (!Lift) Trip->Finish(ELiftTripStatus::Cancelled);
+        const float Speed = Call->GetArgFloat(1);
+        auto Trip = Lift ? Lift->MoveTo(Floor, Speed, Handle.Target) :
+            MakeShared<FLiftTrip>(AngelIO::GetScriptWorld(), Handle.Target.ToString(), Floor, Speed);
+        if (!Lift) Trip->Finish(ELiftTripStatus::Cancelled, TEXT("TargetGone"));
         Call->SetReturnAddress(new FTripHandle(Trip));
     }
 
@@ -77,6 +85,13 @@ namespace
     void TripStatus(asIScriptGeneric* Call)
     {
         Call->SetReturnDWord(static_cast<asDWORD>(static_cast<FTripHandle*>(Call->GetObject())->Value->Status));
+    }
+
+    void TripId(asIScriptGeneric* Call)
+    {
+        const auto& Id = static_cast<FTripHandle*>(Call->GetObject())->Value->GetOperationId();
+        const FString String = Id.ToString(EGuidFormats::DigitsWithHyphensLower);
+        new (Call->GetAddressOfReturnLocation()) std::string(TCHAR_TO_UTF8(*String));
     }
 
     void TripFloor(asIScriptGeneric* Call)
@@ -102,6 +117,8 @@ public:
             Engine.RegisterGlobalFunction("Lift@ FindLift(const string &in name)", asFUNCTION(FindNamedLift), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("Lift", "LiftTrip@ MoveTo(int floor, float speed)", asFUNCTION(MoveLift), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "TripResult@ Wait() const", asFUNCTION(WaitForTrip), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("LiftTrip", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("TripResult", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "TripStatus get_Status() const property", asFUNCTION(TripStatus), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "int get_Floor() const property", asFUNCTION(TripFloor), asCALL_GENERIC) >= 0;
     }

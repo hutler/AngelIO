@@ -74,7 +74,7 @@ bool UAngelIOScriptComponent::StartScript()
     Pending.Reset();
     Program = MakeShared<FAngelIOProgram>();
     auto Running = Program;
-    const bool bStarted = Running->CompileFile(Script) && Running->Start(InitialInputs, GetWorld());
+    const bool bStarted = Running->CompileFile(Script) && Running->Start(InitialInputs, GetWorld(), this);
     if (Running != Program) return false;
     if (!bStarted)
     {

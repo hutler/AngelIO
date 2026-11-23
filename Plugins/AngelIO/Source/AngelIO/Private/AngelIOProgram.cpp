@@ -1,6 +1,10 @@
 #include "AngelIOProgram.h"
 #include "AngelIOScriptAPI.h"
+#include "AngelIOTraceSubsystem.h"
+#include "Components/ActorComponent.h"
+#include "Dom/JsonObject.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "Features/IModularFeatures.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -16,10 +20,75 @@ namespace
     struct FExecutionScope
     {
         TWeakObjectPtr<UWorld> World;
+        TWeakObjectPtr<UActorComponent> Component;
+        FGuid InstanceId;
         TSharedPtr<FAngelIOOperation> Pending;
+        TSharedPtr<FJsonObject> WaitSite;
         FString Label;
     };
     constexpr asPWORD ExecutionKey = 0x41494F;
+
+    TSharedRef<FJsonObject> CaptureSite()
+    {
+        auto Site = MakeShared<FJsonObject>();
+        auto* Context = asGetActiveContext();
+        auto* Scope = Context ? static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey)) : nullptr;
+        Site->SetStringField(TEXT("kind"), Scope ? TEXT("script") : TEXT("native"));
+        if (!Scope) return Site;
+        Site->SetStringField(TEXT("instanceId"), Scope->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
+        const char* Section = nullptr;
+        const int Line = Context->GetLineNumber(0, nullptr, &Section);
+        Site->SetNumberField(TEXT("line"), Line);
+        if (Section) Site->SetStringField(TEXT("script"), UTF8_TO_TCHAR(Section));
+        if (auto* Function = Context->GetFunction())
+            Site->SetStringField(TEXT("function"), UTF8_TO_TCHAR(Function->GetDeclaration()));
+        if (auto* Component = Scope->Component.Get())
+        {
+            Site->SetStringField(TEXT("component"), Component->GetPathName(Scope->World.Get()));
+            if (auto* PC = Cast<APlayerController>(Component->GetOwner()))
+                Site->SetStringField(TEXT("controller"), PC->IsLocalController() ? TEXT("local") : TEXT("remote"));
+        }
+        return Site;
+    }
+}
+
+FAngelIOOperation::FAngelIOOperation(UWorld* World, const FString& Name, const FString& Target,
+    TSharedPtr<FJsonObject> Arguments) : OperationId(FGuid::NewGuid())
+{
+    check(IsInGameThread());
+    if (!World) World = AngelIO::GetScriptWorld();
+    if (!World || World->GetNetMode() == NM_Client) return;
+    Trace = World->GetSubsystem<UAngelIOTraceSubsystem>();
+    if (auto Event = AddEvent(TEXT("call")))
+    {
+        Event->SetStringField(TEXT("operation"), Name);
+        Event->SetStringField(TEXT("target"), Target);
+        if (Arguments)
+        {
+            TSharedPtr<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+            FJsonObject::Duplicate(Arguments, Snapshot);
+            Event->SetObjectField(TEXT("arguments"), Snapshot);
+        }
+        Event->SetObjectField(TEXT("caller"), CaptureSite());
+    }
+}
+
+TSharedPtr<FJsonObject> FAngelIOOperation::AddEvent(const TCHAR* Type) const
+{
+    if (auto* Journal = Trace.Get()) return Journal->Append(OperationId, Type);
+    return nullptr;
+}
+
+void FAngelIOOperation::MarkComplete(const FString& Status, const FString& Reason)
+{
+    check(IsInGameThread());
+    if (bComplete) return;
+    bComplete = true;
+    if (auto Event = AddEvent(TEXT("complete")))
+    {
+        Event->SetStringField(TEXT("status"), Status);
+        if (!Reason.IsEmpty()) Event->SetStringField(TEXT("reason"), Reason);
+    }
 }
 
 UWorld* AngelIO::GetScriptWorld()
@@ -38,6 +107,13 @@ void AngelIO::AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FStr
     {
         Context->SetException("AwaitOperation requires a world-backed mission in Run");
         return;
+    }
+    if (auto Event = Operation->AddEvent(TEXT("wait")))
+    {
+        auto Site = CaptureSite();
+        Event->SetObjectField(TEXT("waiter"), Site);
+        Event->SetBoolField(TEXT("suspended"), !Operation->IsComplete());
+        if (!Operation->IsComplete()) Scope->WaitSite = Site;
     }
     if (Operation->IsComplete()) return;
     Scope->Pending = Operation;
@@ -65,6 +141,9 @@ struct FAngelIOProgram::FImpl
 
     ~FImpl()
     {
+        if (Scope.Pending && Scope.WaitSite)
+            if (auto Event = Scope.Pending->AddEvent(TEXT("detach")))
+                Event->SetObjectField(TEXT("waiter"), Scope.WaitSite);
         if (Context) Context->Release();
         if (Engine) Engine->ShutDownAndRelease();
     }
@@ -348,12 +427,14 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     return true;
 }
 
-bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World)
+bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World, UActorComponent* Component)
 {
     auto& S = *Impl;
     if (S.Status != EAngelIOState::Compiled) return false;
     if (World && World->GetNetMode() == NM_Client) return S.Fail(TEXT("Mission requires authority"));
     S.Scope.World = World;
+    S.Scope.Component = Component;
+    S.Scope.InstanceId = FGuid::NewGuid();
     S.Context = S.Engine->CreateContext();
     if (!S.Context) return S.Fail(TEXT("Could not create execution context"));
     S.Context->SetUserData(&S);
@@ -422,6 +503,9 @@ bool FAngelIOProgram::IsWaitingOnOperation() const
 bool FAngelIOProgram::ResumeCompletedOperation()
 {
     if (!IsWaitingOnOperation() || !Impl->Scope.Pending->IsComplete()) return false;
+    if (auto Event = Impl->Scope.Pending->AddEvent(TEXT("resume")))
+        Event->SetObjectField(TEXT("waiter"), Impl->Scope.WaitSite);
+    Impl->Scope.WaitSite.Reset();
     Impl->Scope.Pending.Reset();
     Impl->Waiting.Reset();
     return Impl->Execute();

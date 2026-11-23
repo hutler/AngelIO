@@ -6,13 +6,8 @@ enum class ELiftTripStatus : int32 { Arrived, Rejected, Cancelled };
 
 struct FLiftTrip : public FAngelIOOperation
 {
-    explicit FLiftTrip(int32 InFloor) : Floor(InFloor) {}
-    void Finish(ELiftTripStatus InStatus)
-    {
-        if (IsComplete()) return;
-        Status = InStatus;
-        MarkComplete();
-    }
+    FLiftTrip(UWorld* World, const FString& Target, int32 InFloor, float Speed);
+    void Finish(ELiftTripStatus InStatus, const FString& Reason = {});
     const int32 Floor;
     ELiftTripStatus Status = ELiftTripStatus::Rejected;
 };

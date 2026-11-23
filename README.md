@@ -44,6 +44,8 @@ Each `MoveTo` call returns its own trip handle. A script can start multiple trip
 | `TripStatus::Rejected` | The lift is busy, disabled, or unready, the floor is outside 1–8, or the speed is not a finite positive number. |
 | `TripStatus::Cancelled` | The lift was destroyed or its mission stopped during the ride. |
 
+`trip.Id` and `result.Id` return the same operation ID as a string. Use it to look up the ride in an exported trace.
+
 The playable version takes the floor and speed from the player's command. It publishes `LastStatus`, `LastFloor`, and `Completed` on `TripPanel` for the owning player. [Demo mission](Content/AngelIO/TypedLift.as)
 
 ## Address actors by name
@@ -102,6 +104,8 @@ Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the 
 
 Inside a native binding, `AngelIO::GetScriptWorld()` gives access to the current mission's world. For a long-running action, store the result in a type derived from `FAngelIOOperation`. Write the result and call `MarkComplete()` on the game thread. Pass the same operation to `AngelIO::AwaitOperation` when the script waits. The component checks completion on its tick while that wait is active. Stopping the caller releases its wait. The lift continues to own any ride it has already started. [Lift implementation](Source/AngelIOHost/AngelIOExampleLift.cpp)
 
+Every `FAngelIOOperation` gets a unique `FGuid`, available through `GetOperationId()`. To describe it in the trace, pass the world, operation name, logical target, and optional JSON arguments to the base constructor. A binding running inside a mission can use its current script world. A native producer outside a script should pass its world explicitly. Call `MarkComplete(Status, Reason)` after recording the domain result. AngelIO captures the active caller and each waiter separately, including when they belong to different script instances. [Lift operation](Source/AngelIOHost/AngelIOLiftTrip.cpp)
+
 ### Multiplayer
 
 The server runs the missions and resolves named targets. Enable **Replicates** on the owning actor to publish component state. On a client, `GetOutput` and `GetWaitingSignal` read the latest replicated values. Subscribe to `OnPublicStateChanged` to update UI, including for late joiners. Inputs and the execution stack stay on the server. Intermediate changes can coalesce between network updates.
@@ -109,6 +113,23 @@ The server runs the missions and resolves named targets. Enable **Replicates** o
 `OnSignal` drives authoritative gameplay. For a sound or visual effect, add the output event name to **Presentation Signals** and subscribe to `OnPresentationSignal`. The host gets one local notification. Relevant clients receive an unreliable multicast carrying its own payload. An effect may arrive before the output update or be lost. A late joiner receives the current outputs without replaying earlier effects.
 
 In the demo, the player's controller sends the request to the server. `LiftFloor 4` and the Blueprint call `ServerRequestLiftFloor(4)` both reach the group through `LiftPanel.as`. The typed `LiftTrip` console command accepts floors 1–8 and speeds up to 2000 cm/s. Each game's module controls which commands and arguments players may send. [Demo controller](Source/AngelIOHost/AngelIOPlayerController.cpp)
+
+## Trace a ride on a listen server
+
+1. Start the demo in PIE as a listen server with a connected player. Wait for the initial rides to finish. From the client's console, enter `LiftTrip 6 400`.
+2. While the freight lift is moving, enter `LiftTrip 7 800` on the host. The host's request gets its own ID and completes with `Rejected` and reason `LiftBusy`. The client's original ride continues.
+3. Enter `AngelIO.ExportTrace` in the host console for a snapshot, or stop PIE to export the final history. The Output Log prints the JSON file path under `Saved/AngelIO/Traces/`.
+4. Call the MCP tool `read_trace` with `{}` to open the latest snapshot. Find a `call` for `Lift.MoveTo`, then pass its `operationId` and the returned `trace` filename to follow that ride. For large histories supply `limit` (1–200, default 50) and use `nextAfterSequence` as the next request's `afterSequence`.
+
+| Event | What it records |
+| --- | --- |
+| `call` | Operation name, target, arguments, and caller. Script sites include the file, line, function and instance ID. Component-backed missions also identify their component, and player controllers identify local or remote ownership on the server. |
+| `wait` | The script and line that read the handle. `suspended` is false when the result was already available. Repeated reads each have their own event. |
+| `complete` | One terminal status per operation. A module can supply a reason such as `LiftBusy` or `TargetEndPlay`. |
+| `resume` | A suspended script continues at its wait site after completion. |
+| `detach` | The waiting script was released. The operation can still complete for other waiters. |
+
+Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number, world time in seconds and operation ID. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
 
 ## MCP tools for editors and agents
 
@@ -135,6 +156,7 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `read_script` | Source text of the selected mission |
 | `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
 | `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
+| `read_trace` | An exported operation history, optionally filtered by operation ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
 
@@ -152,9 +174,9 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | Test | What it checks |
 | --- | --- |
 | `NamedGroupAndLateJoin` | Starts a host and client using the IP NetDriver, calls the lift group, and connects a second client after the ride to check the replicated state. |
-| `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result, including cancellation when a moving lift is destroyed. |
+| `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
 
-To exercise all four MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies.
+To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.
 
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor

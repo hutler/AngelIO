@@ -42,13 +42,19 @@ bool AAngelIOExampleLift::RequestFloor(int32 Floor)
     return Mission->SendSignal(TEXT("RequestFloor"), Floor);
 }
 
-TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed)
+TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed, FName Target)
 {
-    auto Trip = MakeShared<FLiftTrip>(Floor);
-    if (!HasAuthority() || GetNetMode() == NM_Client || ActiveTrip || Floor < 1 || Floor > 8 ||
-        !FMath::IsFinite(TravelSpeed) || TravelSpeed <= 0 || Mission->GetWaitingSignal() != TEXT("RequestFloor"))
+    if (Target.IsNone()) Target = Address->GetTargetName();
+    auto Trip = MakeShared<FLiftTrip>(GetWorld(), Target.IsNone() ? GetName() : Target.ToString(), Floor, TravelSpeed);
+    const TCHAR* Rejection = nullptr;
+    if (!HasAuthority() || GetNetMode() == NM_Client) Rejection = TEXT("NoAuthority");
+    else if (ActiveTrip || Mission->GetWaitingSignal() == TEXT("MotionFinished")) Rejection = TEXT("LiftBusy");
+    else if (Floor < 1 || Floor > 8) Rejection = TEXT("InvalidFloor");
+    else if (!FMath::IsFinite(TravelSpeed) || TravelSpeed <= 0) Rejection = TEXT("InvalidSpeed");
+    else if (Mission->GetWaitingSignal() != TEXT("RequestFloor")) Rejection = TEXT("NotReady");
+    if (Rejection)
     {
-        Trip->Finish(ELiftTripStatus::Rejected);
+        Trip->Finish(ELiftTripStatus::Rejected, Rejection);
         return Trip;
     }
     FAngelIOValue Override;
@@ -56,7 +62,7 @@ TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed
     Override.Float = TravelSpeed;
     if (!Mission->SetInput(TEXT("CommandSpeed"), Override))
     {
-        Trip->Finish(ELiftTripStatus::Rejected);
+        Trip->Finish(ELiftTripStatus::Rejected, TEXT("MissingSpeedInput"));
         return Trip;
     }
     ActiveTrip = Trip;
@@ -66,14 +72,14 @@ TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed
     if (ActiveTrip == Trip && Mission->GetWaitingSignal() != TEXT("MotionFinished"))
     {
         ActiveTrip.Reset();
-        Trip->Finish(ELiftTripStatus::Rejected);
+        Trip->Finish(ELiftTripStatus::Rejected, TEXT("RequestNotStarted"));
     }
     return Trip;
 }
 
 void AAngelIOExampleLift::EndPlay(const EEndPlayReason::Type Reason)
 {
-    if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled);
+    if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled, TEXT("TargetEndPlay"));
     ActiveTrip.Reset();
     Super::EndPlay(Reason);
 }
@@ -83,7 +89,7 @@ void AAngelIOExampleLift::CheckMotionState()
     if (HasAuthority() && IsActorTickEnabled() && Mission->GetWaitingSignal() != TEXT("MotionFinished"))
     {
         SetActorTickEnabled(false);
-        if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled);
+        if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled, TEXT("MissionInterrupted"));
         ActiveTrip.Reset();
     }
 }
@@ -95,7 +101,8 @@ void AAngelIOExampleLift::HandleSignal(FString Name, int32 Value)
         if (ActiveTrip)
         {
             const bool bArrived = Value == ActiveTrip->Floor && AtDestination();
-            ActiveTrip->Finish(bArrived ? ELiftTripStatus::Arrived : ELiftTripStatus::Cancelled);
+            ActiveTrip->Finish(bArrived ? ELiftTripStatus::Arrived : ELiftTripStatus::Cancelled,
+                bArrived ? TEXT("") : TEXT("UnexpectedArrival"));
             ActiveTrip.Reset();
         }
         UE_LOG(LogTemp, Display, TEXT("AngelIO demo: %s arrived at floor %d"), *GetName(), Value);

@@ -5,6 +5,10 @@
 #include "../AngelIOPlayerController.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
+#include "AngelIOTraceSubsystem.h"
+#include "Dom/JsonObject.h"
+#include "Misc/FileHelper.h"
+#include "Serialization/JsonSerializer.h"
 #include "Editor.h"
 #include "EngineUtils.h"
 #include "Settings/LevelEditorPlaySettings.h"
@@ -207,7 +211,8 @@ bool FAngelIOTypedListen::RunTest(const FString&)
                 LiftTrip@ same = a.MoveTo(2, 150);
                 TripResult@ first = same.Wait();
                 LiftTrip@ bad = b.MoveTo(5, -1);
-                out_Ok = first.Status == TripStatus::Arrived && same.Wait().Floor == 2 &&
+                out_Ok = same.Id != bad.Id && same.Id == first.Id &&
+                    first.Status == TripStatus::Arrived && same.Wait().Floor == 2 &&
                     bad.Wait().Status == TripStatus::Rejected && FindLift("Missing") is null &&
                     FindLift("DemoLifts") is null;
             })");
@@ -280,6 +285,62 @@ bool FAngelIOTypedListen::RunTest(const FString&)
             TripOutput(Client->TripPanel, TEXT("LastFloor"), 1) &&
             TripOutput(Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Cancelled)) &&
             Client->TripPanel->GetWaitingSignal() == TEXT("CallLift");
+    });
+    WaitFor(TEXT("export the authoritative operation history"), [this, Server]
+    {
+        FString Path, Text;
+        TestFalse(TEXT("Client has no duplicate operation history"),
+            FindPeer(NM_Client)->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Path));
+        TSharedPtr<FJsonObject> Trace;
+        if (!TestTrue(TEXT("Export parses as JSON"), Server()->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Path) &&
+            FFileHelper::LoadFileToString(Text, *Path) && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Trace)))
+            return true;
+        TestEqual(TEXT("Server capture"), Trace->GetStringField(TEXT("netMode")), FString(TEXT("listenServer")));
+        TMap<int32, FString> Trips;
+        TMap<FString, FString> Timeline, Callers, Status;
+        int32 ExpectedSequence = 0;
+        for (const auto& Value : Trace->GetArrayField(TEXT("events")))
+        {
+            const auto Event = Value->AsObject();
+            const FString Id = Event->GetStringField(TEXT("operationId"));
+            const FString Type = Event->GetStringField(TEXT("type"));
+            TestEqual(TEXT("Ordered sequence"), Event->GetIntegerField(TEXT("sequence")), ++ExpectedSequence);
+            Timeline.FindOrAdd(Id) += Type + TEXT(" ");
+            if (Type == TEXT("call"))
+            {
+                const int32 Floor = Event->GetObjectField(TEXT("arguments"))->GetIntegerField(TEXT("floor"));
+                Trips.Add(Floor, Id);
+                const auto Site = Event->GetObjectField(TEXT("caller"));
+                TestFalse(TEXT("Each invocation owns a new ID"), Callers.Contains(Id));
+                Callers.Add(Id, Site->GetStringField(TEXT("instanceId")));
+                if (Floor == 6 || Floor == 7)
+                {
+                    TestEqual(TEXT("Named lift"), Event->GetStringField(TEXT("target")), FString(TEXT("FreightLift")));
+                    TestEqual(TEXT("Calling script"), Site->GetStringField(TEXT("script")), FString(TEXT("TypedLift.as")));
+                    TestTrue(TEXT("Call has source location"), Site->GetIntegerField(TEXT("line")) > 0);
+                    TestEqual(TEXT("Owning controller"), Site->GetStringField(TEXT("controller")),
+                        FString(Floor == 6 ? TEXT("remote") : TEXT("local")));
+                }
+            }
+            else if (Type == TEXT("wait") || Type == TEXT("resume"))
+            {
+                const auto Site = Event->GetObjectField(TEXT("waiter"));
+                TestTrue(TEXT("Wait has source location"), Site->GetIntegerField(TEXT("line")) > 0);
+                TestEqual(TEXT("Wait belongs to the correct instance"), Site->GetStringField(TEXT("instanceId")), Callers.FindRef(Id));
+            }
+            else if (Type == TEXT("complete")) Status.Add(Id, Event->GetStringField(TEXT("status")));
+        }
+        TestEqual(TEXT("Six distinct trip IDs"), Callers.Num(), 6);
+        TestNotEqual(TEXT("Host and remote run separate instances of TypedLift.as"),
+            Callers.FindRef(Trips.FindRef(7)), Callers.FindRef(Trips.FindRef(6)));
+        TestEqual(TEXT("Remote delayed trip"), Timeline.FindRef(Trips.FindRef(6)), FString(TEXT("call wait complete resume ")));
+        TestEqual(TEXT("Host busy trip returns inline"), Timeline.FindRef(Trips.FindRef(7)), FString(TEXT("call complete wait ")));
+        TestEqual(TEXT("Completed trip can be read twice"), Timeline.FindRef(Trips.FindRef(2)), FString(TEXT("call complete wait wait ")));
+        TestEqual(TEXT("Remote arrival"), Status.FindRef(Trips.FindRef(6)), FString(TEXT("Arrived")));
+        TestEqual(TEXT("Concurrent short ride"), Status.FindRef(Trips.FindRef(4)), FString(TEXT("Arrived")));
+        TestEqual(TEXT("Host rejection"), Status.FindRef(Trips.FindRef(7)), FString(TEXT("Rejected")));
+        TestEqual(TEXT("Remote cancellation"), Status.FindRef(Trips.FindRef(1)), FString(TEXT("Cancelled")));
+        return true;
     });
     EndListenSession();
     return true;

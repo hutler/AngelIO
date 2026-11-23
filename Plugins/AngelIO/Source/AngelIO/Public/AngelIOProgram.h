@@ -4,6 +4,7 @@
 #include "AngelIOProgram.generated.h"
 
 class UWorld;
+class UActorComponent;
 
 UENUM(BlueprintType)
 enum class EAngelIOType : uint8 { Integer, Float, Boolean };
@@ -60,7 +61,7 @@ public:
 
     bool CompileFile(const FString& RelativeScript);
     bool Compile(const FString& Label, const FString& Source);
-    bool Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World = nullptr);
+    bool Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World = nullptr, UActorComponent* Component = nullptr);
     bool SetInput(const FString& Name, const FAngelIOValue& Value);
     bool GetOutput(const FString& Name, FAngelIOValue& Value) const;
     bool Signal(const FString& Name, int32 Value);
