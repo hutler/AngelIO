@@ -1,6 +1,7 @@
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 #include "AngelIOTestSignalObserver.h"
 #include "../AngelIOExampleLift.h"
+#include "../AngelIOLiftTrip.h"
 #include "../AngelIOPlayerController.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
@@ -53,14 +54,8 @@ struct FListenPeers
     TStrongObjectPtr<UAngelIOTestSignalObserver> HostProbe{NewObject<UAngelIOTestSignalObserver>()};
     TStrongObjectPtr<UAngelIOTestSignalObserver> ClientProbe{NewObject<UAngelIOTestSignalObserver>()};
 };
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOListen, "AngelIO.Network.ListenServer.NamedGroupAndLateJoin",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FAngelIOListen::RunTest(const FString&)
+void StartListenSession()
 {
-    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
     auto* Settings = NewObject<ULevelEditorPlaySettings>();
     Settings->SetPlayNetMode(EPlayNetMode::PIE_ListenServer);
     Settings->SetPlayNumberOfClients(2); // Host player and one remote player.
@@ -72,15 +67,40 @@ bool FAngelIOListen::RunTest(const FString&)
     Params.GlobalMapOverride = TEXT("/Game/Demo/TwoLifts");
     Params.bAllowOnlineSubsystem = false;
     GEditor->RequestPlaySession(Params);
+}
 
-    const auto Peers = MakeShared<FListenPeers>();
-    auto WaitFor = [this](FString Step, TFunction<bool()> Check)
+auto ListenSteps(FAutomationTestBase* Test)
+{
+    return [Test](FString Step, TFunction<bool()> Check)
     {
         ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand(
-            [this, Check] { return HasAnyErrors() || Check(); },
-            [this, Step] { AddError(TEXT("Timed out: ") + Step); return true; }, 35.f));
+            [Test, Check] { return Test->HasAnyErrors() || Check(); },
+            [Test, Step] { Test->AddError(TEXT("Timed out: ") + Step); return true; }, 35.f));
     };
+}
 
+void EndListenSession()
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([] { GEditor->RequestEndPlayMap(); return true; }));
+    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand([] { return !GEditor->PlayWorld; }, 15.f));
+}
+
+bool TripOutput(UAngelIOScriptComponent* Panel, const TCHAR* Name, int32 Expected)
+{
+    FAngelIOValue Value;
+    return Panel && Panel->GetOutput(Name, Value) && Value.Integer == Expected;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOListen, "AngelIO.Network.ListenServer.NamedGroupAndLateJoin",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOListen::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession();
+    const auto Peers = MakeShared<FListenPeers>();
+    auto WaitFor = ListenSteps(this);
     WaitFor(TEXT("host and client finish both initial trips"), [this, Peers]
     {
         auto* Host = FindPeer(NM_ListenServer);
@@ -155,8 +175,113 @@ bool FAngelIOListen::RunTest(const FString&)
         }
         return true;
     });
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([] { GEditor->RequestEndPlayMap(); return true; }));
-    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand([] { return !GEditor->PlayWorld; }, 15.f));
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOTypedListen, "AngelIO.Network.ListenServer.TypedTrips",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOTypedListen::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession();
+    auto WaitFor = ListenSteps(this);
+    auto Server = [] { return FindPeer(NM_ListenServer); };
+    auto LocalPC = [](ENetMode Mode) -> AAngelIOPlayerController*
+    {
+        auto* World = FindPeer(Mode);
+        return World ? Cast<AAngelIOPlayerController>(World->GetFirstPlayerController()) : nullptr;
+    };
+
+    WaitFor(TEXT("client calls freight lift from its own controller"), [this, Server, LocalPC]
+    {
+        auto* Client = LocalPC(NM_Client);
+        if (!Client || !AtFloor(Client->GetWorld(), 2, 2, 1) || !AtFloor(Server(), 3, 3, 1)) return false;
+        FAngelIOProgram Probe;
+        const TCHAR* Source = TEXT(R"(
+            bool out_Ok;
+            void Run() {
+                Lift@ a = FindLift("FREIGHTLIFT");
+                Lift@ b = FindLift("ServiceLiftB");
+                LiftTrip@ same = a.MoveTo(2, 150);
+                TripResult@ first = same.Wait();
+                LiftTrip@ bad = b.MoveTo(5, -1);
+                out_Ok = first.Status == TripStatus::Arrived && same.Wait().Floor == 2 &&
+                    bad.Wait().Status == TripStatus::Rejected && FindLift("Missing") is null &&
+                    FindLift("DemoLifts") is null;
+            })");
+        FAngelIOValue Ok;
+        TestTrue(TEXT("Inline, repeated wait, invalid speed and unique names"), Probe.Compile(TEXT("probe"), Source) &&
+            Probe.Start({}, Server()) && Probe.State() == EAngelIOState::Finished && Probe.GetOutput(TEXT("Ok"), Ok) && Ok.Boolean);
+        TestFalse(TEXT("Client cannot start typed mission locally"), Client->TripPanel->StartScript());
+        Client->ConsoleCommand(TEXT("LiftTrip 6 400"));
+        return true;
+    });
+
+    auto OtherLiftCaller = MakeShared<FAngelIOProgram>();
+    WaitFor(TEXT("remote trip is pending when host requests another ride"), [this, Server, LocalPC, OtherLiftCaller]
+    {
+        auto* Client = LocalPC(NM_Client);
+        auto* Host = LocalPC(NM_ListenServer);
+        if (!Client || !Host || Client->TripPanel->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+        auto* Freight = FindLift(Server(), 2);
+        FAngelIOValue Speed;
+        TestTrue(TEXT("Requested speed used by physical lift"), Freight->Mission->GetOutput(TEXT("TripSpeed"), Speed) && Speed.Float == 400);
+        Host->LiftTrip(7, 800);
+        TestTrue(TEXT("Host's busy request has its own rejected result"),
+            TripOutput(Host->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Rejected)) &&
+            TripOutput(Host->TripPanel, TEXT("LastFloor"), 7) && TripOutput(Host->TripPanel, TEXT("Completed"), 1));
+        TestTrue(TEXT("Second named lift accepts concurrent trip"), OtherLiftCaller->Compile(TEXT("second lift"),
+            TEXT("bool out_Ok; void Run() { TripResult@ r = FindLift(\"ServiceLiftB\").MoveTo(4, 1800).Wait(); ")
+            TEXT("out_Ok = r.Status == TripStatus::Arrived && r.Floor == 4; }")) &&
+            OtherLiftCaller->Start({}, Server()) && OtherLiftCaller->IsWaitingOnOperation());
+        for (FConstPlayerControllerIterator It = Server()->GetPlayerControllerIterator(); It; ++It)
+        {
+            auto* PC = Cast<AAngelIOPlayerController>(It->Get());
+            if (PC && !PC->IsLocalController())
+                TestFalse(TEXT("Matching signal cannot complete a trip"), PC->TripPanel->SendSignal(TEXT("LiftTrip.Wait"), 7));
+        }
+        return true;
+    });
+
+    WaitFor(TEXT("short ride completes while remote caller still awaits freight lift"), [this, OtherLiftCaller, LocalPC]
+    {
+        if (!OtherLiftCaller->ResumeCompletedOperation()) return false;
+        FAngelIOValue Ok;
+        TestTrue(TEXT("Short ride returns its own arrival"), OtherLiftCaller->GetOutput(TEXT("Ok"), Ok) && Ok.Boolean);
+        TestTrue(TEXT("Remote caller is still waiting for floor six"),
+            LocalPC(NM_Client)->TripPanel->GetWaitingSignal() == TEXT("LiftTrip.Wait") &&
+            TripOutput(LocalPC(NM_Client)->TripPanel, TEXT("Completed"), 0));
+        return true;
+    });
+
+    WaitFor(TEXT("owner receives arrival for floor six"), [this, Server, LocalPC]
+    {
+        auto* Client = LocalPC(NM_Client);
+        if (!Client || !TripOutput(Client->TripPanel, TEXT("Completed"), 1) || !AtFloor(Client->GetWorld(), 2, 6, 3)) return false;
+        TestTrue(TEXT("Other named lift reached its own floor"), AtFloor(Server(), 3, 4, 2));
+        TestTrue(TEXT("Server result replicated to calling player"),
+            TripOutput(Client->TripPanel, TEXT("LastFloor"), 6) &&
+            TripOutput(Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Arrived)));
+        Client->LiftTrip(1, 180);
+        return true;
+    });
+    WaitFor(TEXT("remove lift during the next remote ride"), [Server, LocalPC]
+    {
+        auto* Client = LocalPC(NM_Client);
+        if (!Client || Client->TripPanel->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+        return FindLift(Server(), 2)->Destroy();
+    });
+    WaitFor(TEXT("caller receives one cancellation for floor one"), [LocalPC]
+    {
+        auto* Client = LocalPC(NM_Client);
+        return Client && TripOutput(Client->TripPanel, TEXT("Completed"), 2) &&
+            TripOutput(Client->TripPanel, TEXT("LastFloor"), 1) &&
+            TripOutput(Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Cancelled)) &&
+            Client->TripPanel->GetWaitingSignal() == TEXT("CallLift");
+    });
+    EndListenSession();
     return true;
 }
 #endif

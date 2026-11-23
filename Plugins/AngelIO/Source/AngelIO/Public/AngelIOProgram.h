@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "AngelIOProgram.generated.h"
 
+class UWorld;
+
 UENUM(BlueprintType)
 enum class EAngelIOType : uint8 { Integer, Float, Boolean };
 
@@ -58,10 +60,13 @@ public:
 
     bool CompileFile(const FString& RelativeScript);
     bool Compile(const FString& Label, const FString& Source);
-    bool Start(const TMap<FString, FAngelIOValue>& Inputs);
+    bool Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World = nullptr);
     bool SetInput(const FString& Name, const FAngelIOValue& Value);
     bool GetOutput(const FString& Name, FAngelIOValue& Value) const;
     bool Signal(const FString& Name, int32 Value);
+    bool IsWaitingOnOperation() const;
+    bool ResumeCompletedOperation();
+    const TArray<FString>& ExternalDeclarations() const;
 
     const TArray<FAngelIOPort>& Ports() const;
     const TMap<int32, FString>& Signals(bool bIncoming) const;

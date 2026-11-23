@@ -1,33 +1,69 @@
 # AngelIO
 
-Плагин для сценариев уровня на AngelScript и демонстрационный проект Unreal Engine 5.8.4 под Windows x64. Авторы миссий редактируют обычные UTF-8 файлы в `Content/AngelIO`. В редакторе и в игре один и тот же runtime компилирует сценарий, принимает входы компонента и публикует его выходы.
+AngelIO is an Unreal Engine plugin for writing level logic in AngelScript. A mission can find level actors by name, call typed functions supplied by game modules, and wait for a particular operation to finish. The editor and the packaged game use the same runtime to compile UTF-8 `.as` files from `Content/AngelIO`. The included demo targets Unreal Engine 5.8.4 on Windows x64.
 
-## Запуск примера
+## Run the two-lift demo
 
-Откройте `AngelIO.uproject` в Unreal Engine 5.8 и запустите Play на карте `/Game/Demo/TwoLifts`. В первый раз Unreal может предложить собрать C++-модули. Стартовая карта содержит две платформы. Каждая получает свой запрос на этаж и запускает свою копию `Elevator.as`. При высоте этажа 200 см и скорости 240 см/с первая платформа поднимается на 200 см, вторая на 400 см.
+Open [AngelIO.uproject](AngelIO.uproject) with Unreal Engine 5.8, build the C++ modules if prompted, and press **Play** on the default map, `/Game/Demo/TwoLifts`. Each platform runs its own instance of `Elevator.as`. The lifts start on floor 1 and travel to floors 2 and 3. Each floor is 200 cm apart and the default speed is 240 cm/s.
 
-У размещённого `AngelIOExampleLift` свойство `Requested Floor` задаёт первую поездку. В компоненте `Mission` через `Initial Inputs` можно задать `StartingFloor` (int), `TravelSpeed` (float, см/с) и `Enabled` (bool). Дополнительную поездку можно запустить вызовом `Request Floor` из Blueprint. Типы Unreal-компонента и делегат доступны также из C++.
+Once the platforms stop, try either command in the player console. Both work from the listen-server host and from a connected player.
 
-## Как написать сценарий
+| Command | What to expect |
+| --- | --- |
+| `LiftTrip 6 400` | The freight lift moves to floor 6 at 400 cm/s. The requesting player's `TripPanel` receives the result for that ride. |
+| `LiftFloor 4` | The panel sends `RequestFloor` to the `DemoLifts` group. Both idle lifts move to floor 4. |
 
-### Адресация по имени
+To change the initial ride, select a placed `AngelIOExampleLift` and edit **Requested Floor**. The `Mission` component's **Initial Inputs** accepts `StartingFloor` (int), `TravelSpeed` (float, in cm/s), and `Enabled` (bool). A Blueprint can request another ride with **Request Floor**.
 
-Задайте компоненту поле **Target Name** в Details. Это логическое имя в игровом мире. Показываемое в Outliner имя актора можно менять независимо. Уникальное имя выбирает один объект, одинаковое имя объединяет несколько. Например, у обоих лифтов демо имя `DemoLifts`. Сценарий панели вызывает их одной строкой.
+## Call a typed API and wait for a trip
+
+The demo game module exposes `Lift`, `LiftTrip`, and `TripResult` to AngelScript. This mission records the floor only after its own ride arrives.
+
+```angelscript
+int out_ArrivedFloor;
+
+void Run()
+{
+    Lift@ lift = FindLift("FreightLift");
+    if (lift is null) return;
+
+    LiftTrip@ trip = lift.MoveTo(6, 400.0f);
+    TripResult@ result = trip.Wait();
+    if (result.Status == TripStatus::Arrived)
+        out_ArrivedFloor = result.Floor;
+}
+```
+
+`FindLift` looks for a single matching lift actor in the current mission's world. A missing or ambiguous name returns `null`. On the demo map, the lifts' `Address` components use the individual names `FreightLift` and `ServiceLiftB`. Their `Mission` components share the group name `DemoLifts`.
+
+Each `MoveTo` call returns its own trip handle. A script can start multiple trips, keep the handles, and wait for them in any order. Waiting for a completed trip returns immediately, including a request for the floor where an idle lift already stands. The result stays available while the script holds a reference. `result.Floor` always contains the requested floor.
+
+| `result.Status` | Meaning |
+| --- | --- |
+| `TripStatus::Arrived` | The platform reached the requested floor. |
+| `TripStatus::Rejected` | The lift is busy, disabled, or unready, the floor is outside 1–8, or the speed is not a finite positive number. |
+| `TripStatus::Cancelled` | The lift was destroyed or its mission stopped during the ride. |
+
+The playable version takes the floor and speed from the player's command. It publishes `LastStatus`, `LastFloor`, and `Completed` on `TripPanel` for the owning player. [Demo mission](Content/AngelIO/TypedLift.as)
+
+## Address actors by name
+
+Set **Target Name** on an Angel IO Script Component in the Details panel. This logical name is independent of the actor's Outliner label. A shared name lets a mission send a signal to a group.
 
 ```angelscript
 SendTo("DemoLifts", "RequestFloor", 4);
 ```
 
-Вызов ставится в очередь вместе с `Emit`. Когда текущая ветка остановится на ожидании или вернётся, реестр выбирает живых адресатов и доставляет каждому вход `RequestFloor` со значением `4`. Сценарий адресата проснётся, если уже ждёт этот сигнал. Blueprint или C++ может подписаться на `OnNamedInput` компонента и обработать команду даже без скрипта. Для такого компонента отключите `Start On Begin Play`.
+`SendTo` queues the request alongside `Emit`. When execution reaches a wait or returns, the registry selects live components with that name and delivers `RequestFloor` with the integer payload `4` to each one. A mission waiting for that signal resumes. Blueprint and C++ endpoints can also handle `OnNamedInput` directly. Disable **Start On Begin Play** on an endpoint that has no script.
 
-Реестр у каждого мира свой. Регистрация идёт на BeginPlay, снятие — на EndPlay. В игре для переименования используйте `SetTargetName`. Позже заспавненный актор с тем же именем получит следующую отправку. Имя цели использует правила Unreal `FName`, имя сигнала чувствительно к регистру. Пустое имя оставляет компонент вне групп. В Blueprint и C++ доступны `FindTargets` и `SendTo` подсистемы `AngelIOTargetRegistry`.
+Each world has its own registry. Components register at `BeginPlay` and unregister at `EndPlay`. Use `SetTargetName` to rename a component during play. A newly spawned component joins future sends. Target names follow Unreal's case-insensitive `FName` rules. Signal names are case-sensitive. An empty target name leaves the component outside all groups. Blueprint and C++ can call `FindTargets` and `SendTo` on the `AngelIOTargetRegistry` world subsystem.
 
-### Переменные и события
+## Write a mission
 
-1. Положите файл, например `Missions/Arrival.as`, под `Content/AngelIO`. Добавьте актору компонент **Angel IO Script Component**, в поле `Script` укажите `Missions/Arrival.as`.
-2. Объявите входы как глобальные `in_Name`, выходы как `out_Name`. Поддерживаются `int`, `float` и `bool`. На стороне компонента имя регистрозависимое, без префикса. Остальные переменные относятся к экземпляру сценария.
-3. Для входящих и исходящих событий объявите перечисления `InputSignal` и `OutputSignal` в глобальной области. Передайте в `WaitFor` входящее событие, в `Emit` исходящее. Числовые значения внутри одного перечисления должны быть уникальны. Полезная нагрузка сигнала в версии 0.1 — один `int`.
-4. Начните последовательность в `void Run()`. Внешний модуль вызывает `SendSignal(Name, Value)`, а скрипт получает значение через `SignalValue()` после ожидания. Исходящие события приходят подписчикам `OnSignal`. Постоянный результат читается через `GetOutput`.
+1. Save a script under `Content/AngelIO`, for example `Missions/Arrival.as`. Add an **Angel IO Script Component** to an actor and set **Script** to `Missions/Arrival.as`.
+2. Declare inputs as `in_Name` globals and outputs as `out_Name` globals. Supported port types are `int`, `float`, and `bool`. The component uses the case-sensitive name without the prefix. Each instance owns its globals.
+3. Declare incoming and outgoing events in the global `InputSignal` and `OutputSignal` enums. Give each member a unique value within its enum. Each signal carries one `int`.
+4. Define `void Run()` as the entry point. Use `WaitFor` and `SignalValue()` to receive an input, and `Emit` to send an output event.
 
 ```angelscript
 int in_Bonus = 2;
@@ -43,38 +79,40 @@ void Run()
 }
 ```
 
-Если передать `Award = 3`, подписчик получит `ScoreChanged = 5`. Значение `Score` останется доступно после завершения. `GetOutput` и `SetInput` возвращают признак успеха. Blueprint может собрать или разобрать `Angel IO Value` стандартными узлами Make/Break.
+Calling `SendSignal("Award", 3)` on the waiting component emits `ScoreChanged` with value `5`. Subscribers receive the event through `OnSignal`. The `Score` output stays readable after the mission returns. `GetOutput` and `SetInput` return a success flag. Blueprints can construct and inspect an **Angel IO Value** with the standard Make and Break nodes.
 
-По умолчанию сценарий запускается на BeginPlay. Чтобы успеть подписаться на самое первое событие из Blueprint, отключите `Start On Begin Play`, подключите `OnSignal`, затем вызовите `StartScript`. Повторный старт создаёт свежий экземпляр и заново читает файл. После редактирования можно также перезапустить PIE.
+Scripts start at `BeginPlay` by default. To observe the first event in Blueprint, disable **Start On Begin Play**, bind `OnSignal`, then call `StartScript`. Starting again reads the file and creates a fresh instance. Restarting Play In Editor (PIE) also picks up edits.
 
-## Порядок доставки
+### Signal delivery and lifetime
 
-- Вход принимает только экземпляр, который сейчас ждёт это имя. При несовпадении `SendSignal` вернёт `false`. Один экземпляр исполняет одну ветку.
-- `Emit` записывает сообщение. Компонент вызывает подписчиков в порядке отправки, когда скрипт дошёл до следующего ожидания или завершился. Поэтому синхронный ответ внешнего модуля в том же кадре уже может разбудить следующее ожидание.
-- При исключении текущая порция исходящих сообщений отбрасывается. Диагностика попадает в `LogAngelIO`. `GetWaitingSignal` показывает текущее ожидание.
-- Состоянием владеет компонент. `StopScript` и `EndPlay` освобождают контекст и снимают ожидание. Игровой код обращается к компоненту на игровом потоке.
+- Each instance runs one execution path. `SendSignal` returns `false` when the instance is not waiting for that signal.
+- `Emit` queues events in order. The component dispatches them once the script suspends or returns, so a subscriber can answer synchronously in the same frame and resume the next wait.
+- An exception discards the current batch of outgoing events and reports diagnostics to `LogAngelIO`. `GetWaitingSignal` shows what the instance is waiting for.
+- The component owns the execution context. `StopScript` and `EndPlay` release it and clear its wait. Call the component from the game thread.
 
-## Использование в своём проекте
+## Use the plugin in your project
 
-### Сетевая игра
+Copy [Plugins/AngelIO](Plugins/AngelIO) into a C++ project and enable the plugin. Put mission files in `Content/AngelIO`. Add `AngelIO` to **Project Settings → Packaging → Additional Non-Asset Directories to Package** so newly added scripts ship with the game. The demo already includes this setting. [Demo packaging configuration](Config/DefaultGame.ini)
 
-В сетевом мире миссии и именованную рассылку исполняет сервер. Чтобы клиенты видели состояние компонента, включите **Replicates** у его актора. На клиенте `GetOutput` и `GetWaitingSignal` читают последнюю полученную копию. Подписка `OnPublicStateChanged` подходит для обновления UI, в том числе после позднего подключения. Входы и стек выполнения принадлежат серверу. Промежуточные состояния между двумя сетевыми обновлениями могут объединяться.
+Add `AngelIO` to the dependencies in your module's `Build.cs` to use the component or register script bindings. The plugin ships with the AngelScript 2.39.0 static library for Win64. The rebuild script verifies the SDK archive's SHA-256 and uses MSVC 2022 x64. Other platforms require a library build for that target. [Rebuild script](Tools/BuildAngelScript.ps1) · [AngelScript SDK](https://www.angelcode.com/angelscript/downloads.html)
 
-`OnSignal` вызывает игровую логику у хоста. Для звука или визуальных эффектов добавьте имя выходного события в **Presentation Signals** и подпишитесь на `OnPresentationSignal`. Хост получает одно локальное уведомление. Текущие релевантные клиенты получают ненадёжный multicast с собственным значением. Эффект может прийти раньше обновления выходов или потеряться. Поздний клиент получает текущие выходы без истории эффектов.
+### Expose types from a game module
 
-В демо введите `LiftFloor 4` в консоли игрока или вызовите `ServerRequestLiftFloor(4)` на локальном `AngelIOPlayerController` из Blueprint. Через принадлежащий игроку контроллер запрос поступит на сервер. Там проверяется диапазон этажей 1–8, и `LiftPanel.as` посылает команду группе. Такой же путь работает для игрока-хоста. Игровой модуль определяет допустимые команды и аргументы.
+Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the provider with `IModularFeatures` during `StartupModule` and unregister it during `ShutdownModule`. AngelIO calls the provider for each new VM, including the validation commandlet's VM. Keep the module loaded for the lifetime of its VMs. [Provider interface](Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Demo bindings](Source/AngelIOHost/AngelIOHost.cpp)
 
-Для повторения сетевого теста запустите в Unreal Automation фильтр `AngelIO.Network.ListenServer`. Он открывает `TwoLifts` в PIE с игроком-хостом и клиентом через IP NetDriver, затем подключает второго клиента после поездки. Проверяются групповой вызов, репликация движения и выходов, однократная обработка у хоста, переименование и остановка миссии.
+Inside a native binding, `AngelIO::GetScriptWorld()` gives access to the current mission's world. For a long-running action, store the result in a type derived from `FAngelIOOperation`. Write the result and call `MarkComplete()` on the game thread. Pass the same operation to `AngelIO::AwaitOperation` when the script waits. The component checks completion on its tick while that wait is active. Stopping the caller releases its wait. The lift continues to own any ride it has already started. [Lift implementation](Source/AngelIOHost/AngelIOExampleLift.cpp)
 
-### Подключение плагина
+### Multiplayer
 
-Скопируйте каталог `Plugins/AngelIO` в C++-проект и включите плагин. Скрипты хост-проекта размещаются в `Content/AngelIO`. Для стабильной упаковки вновь добавленных сценариев добавьте `AngelIO` в **Project Settings → Packaging → Additional Non-Asset Directories to Package**. В демопроекте это уже сделано в `Config/DefaultGame.ini`. Внешнему C++-модулю для доступа к компоненту нужна зависимость `AngelIO` в его Build.cs. В качестве примера подключения служит `Source/AngelIOHost/AngelIOExampleLift.cpp`.
+The server runs the missions and resolves named targets. Enable **Replicates** on the owning actor to publish component state. On a client, `GetOutput` and `GetWaitingSignal` read the latest replicated values. Subscribe to `OnPublicStateChanged` to update UI, including for late joiners. Inputs and the execution stack stay on the server. Intermediate changes can coalesce between network updates.
 
-В поставку входит статическая Win64-библиотека AngelScript 2.39.0. Для пересборки из официального SDK есть `Tools/BuildAngelScript.ps1`. Он проверяет SHA-256 архива и использует MSVC 2022 x64. Дополнительные платформы потребуют отдельной сборки библиотеки. [SDK AngelScript](https://www.angelcode.com/angelscript/downloads.html)
+`OnSignal` drives authoritative gameplay. For a sound or visual effect, add the output event name to **Presentation Signals** and subscribe to `OnPresentationSignal`. The host gets one local notification. Relevant clients receive an unreliable multicast carrying its own payload. An effect may arrive before the output update or be lost. A late joiner receives the current outputs without replaying earlier effects.
 
-## Доступ для LLM
+In the demo, the player's controller sends the request to the server. `LiftFloor 4` and the Blueprint call `ServerRequestLiftFloor(4)` both reach the group through `LiftPanel.as`. The typed `LiftTrip` console command accepts floors 1–8 and speeds up to 2000 cm/s. Each game's module controls which commands and arguments players may send. [Demo controller](Source/AngelIOHost/AngelIOPlayerController.cpp)
 
-MCP-сервер запускается локально через stdio. Ему нужны Node.js, собранная Editor-цель проекта с AngelIO и путь к UnrealEditor-Cmd.exe. Установите зависимости командой `npm ci --prefix Tools/MCP`. Пример конфигурации клиента для этого рабочего каталога приведён ниже. При переносе проекта замените пути.
+## MCP tools for editors and agents
+
+The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, the project's built Unreal Editor target with AngelIO enabled, and the path to `UnrealEditor-Cmd.exe`. From the repository root, run `npm ci --prefix Tools/MCP`. Set the paths in your MCP client's configuration to match your checkout and engine installation.
 
 ```json
 {
@@ -91,28 +129,39 @@ MCP-сервер запускается локально через stdio. Ем�
 }
 ```
 
-| Инструмент | Что получает агент |
+| Tool | Result |
 | --- | --- |
-| `list_scripts` | Относительные пути сценариев проекта |
-| `read_script` | Текст выбранного файла |
-| `describe_api` | Точку входа, вызовы, типы и правила доставки |
-| `validate_script` | Результат компиляции, типы и направления портов, имена событий, ошибки компилятора со строкой и колонкой |
+| `list_scripts` | Paths relative to the project's `Content/AngelIO` directory |
+| `read_script` | Source text of the selected mission |
+| `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
+| `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
 
-Агент читает контракт, редактирует обычный файл средствами рабочей копии, затем вызывает `validate_script`. Сервер запускает headless-командлет того же плагина. Проверка компилирует код без выполнения глобальных инициализаторов и `Run`. У ошибок контракта, относящихся ко всему модулю, координаты равны нулю. Для сборок и CI тот же JSON доступен напрямую.
+An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
+
+## Validation and tests
+
+To generate the same JSON report from PowerShell or CI, run the commandlet from the project root. It returns `0` on success, `1` for an invalid script, or `2` for invalid arguments or a report write failure.
 
 ```powershell
 $editor = 'E:/DEV/UEBASE/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe'
 & $editor "$PWD/AngelIO.uproject" -run=AngelIOCheck -Script=Elevator.as "-Report=$env:TEMP/angelio.json" -unattended -nullrhi -ddc=InstalledNoZenLocalFallback
 ```
 
-Командлет возвращает `0` при успехе, `1` при ошибке сценария и `2` при неверных параметрах или ошибке записи отчёта. Регрессионные тесты доступны в Unreal Automation по фильтру `AngelIO.`. Для проверки всех четырёх инструментов реальным MCP-клиентом из корня демопроекта выполните следующую команду после установки зависимостей.
+Run the `AngelIO.` filter in Unreal Automation for the full regression suite. The `AngelIO.Network.ListenServer` filter selects two PIE tests.
+
+| Test | What it checks |
+| --- | --- |
+| `NamedGroupAndLateJoin` | Starts a host and client using the IP NetDriver, calls the lift group, and connects a second client after the ride to check the replicated state. |
+| `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result, including cancellation when a moving lift is destroyed. |
+
+To exercise all four MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies.
 
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor
 ```
 
-[Архитектура и этапы разработки](Docs/Plan.md)
+[Architecture and development plan (in Russian)](Docs/Plan.md)
 
-## Лицензия
+## License
 
-Код AngelIO, MCP-сервер и демопроект доступны по [лицензии MIT](LICENSE). Библиотека AngelScript 2.39.0 и дополнение `scriptstdstring` распространяются по [лицензии zlib](Plugins/AngelIO/Source/ThirdParty/AngelScript/LICENSE).
+AngelIO, the MCP server, and the demo project are available under the MIT license. AngelScript 2.39.0 and its `scriptstdstring` add-on use the zlib license. [MIT license](LICENSE) · [AngelScript license](Plugins/AngelIO/Source/ThirdParty/AngelScript/LICENSE)

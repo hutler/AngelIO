@@ -9,6 +9,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogAngelIO, Log, All);
 UAngelIOScriptComponent::UAngelIOScriptComponent()
 {
     SetIsReplicatedByDefault(true);
+    PrimaryComponentTick.bCanEverTick = true;
+    PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 void UAngelIOScriptComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -71,7 +73,10 @@ bool UAngelIOScriptComponent::StartScript()
     if (!CanRunMission()) return false;
     Pending.Reset();
     Program = MakeShared<FAngelIOProgram>();
-    if (!Program->CompileFile(Script) || !Program->Start(InitialInputs))
+    auto Running = Program;
+    const bool bStarted = Running->CompileFile(Script) && Running->Start(InitialInputs, GetWorld());
+    if (Running != Program) return false;
+    if (!bStarted)
     {
         ReportErrors();
         PublishState();
@@ -111,7 +116,10 @@ bool UAngelIOScriptComponent::GetOutput(const FString& Name, FAngelIOValue& Valu
 bool UAngelIOScriptComponent::SendSignal(const FString& Name, int32 Value)
 {
     if (!CanRunMission() || !Program || Program->State() != EAngelIOState::Waiting) return false;
-    if (!Program->Signal(Name, Value))
+    auto Running = Program;
+    const bool bDelivered = Running->Signal(Name, Value);
+    if (Running != Program) return bDelivered;
+    if (!bDelivered)
     {
         if (Program->State() == EAngelIOState::Failed)
         {
@@ -175,6 +183,7 @@ void UAngelIOScriptComponent::MulticastPresentationSignal_Implementation(const F
 void UAngelIOScriptComponent::PublishState()
 {
     if (bDispatching) return;
+    SetComponentTickEnabled(Program && Program->IsWaitingOnOperation());
     FAngelIOPublicState Next;
     if (Program)
     {
@@ -197,6 +206,21 @@ void UAngelIOScriptComponent::PublishState()
 void UAngelIOScriptComponent::OnRep_PublicState()
 {
     OnPublicStateChanged.Broadcast();
+}
+
+void UAngelIOScriptComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFunction)
+{
+    Super::TickComponent(DeltaTime, TickType, TickFunction);
+    auto Running = Program;
+    if (!Running) return;
+    const bool bResumed = Running->ResumeCompletedOperation();
+    if (Running != Program) return;
+    if (bResumed) FlushEvents();
+    else if (Running->State() == EAngelIOState::Failed)
+    {
+        ReportErrors();
+        PublishState();
+    }
 }
 
 void UAngelIOScriptComponent::ReportErrors() const

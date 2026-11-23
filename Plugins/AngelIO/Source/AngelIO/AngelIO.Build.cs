@@ -8,7 +8,7 @@ public class AngelIO : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine" });
         string sdk = Path.Combine(ModuleDirectory, "..", "ThirdParty", "AngelScript");
-        PrivateIncludePaths.Add(Path.Combine(sdk, "include"));
+        PublicSystemIncludePaths.Add(Path.Combine(sdk, "include"));
         PublicAdditionalLibraries.Add(Path.Combine(sdk, "lib", "Win64", "angelscript.lib"));
         if (Target.ProjectFile != null)
         {

@@ -24,6 +24,9 @@ try {
   assert((await call("list_scripts")).structuredContent.scripts.includes("Elevator.as"));
   const api = (await call("describe_api")).structuredContent;
   assert.equal(api.entry, "void Run()");
+  assert(api.externalDeclarations.some(s => s.includes("Lift::MoveTo(int floor, float speed)")));
+  assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait()")));
+  assert((await call("validate_script", { script: "TypedLift.as" })).structuredContent.valid);
   assert(api.calls.some(signature => signature.startsWith("SendTo(")));
   const panel = (await call("validate_script", { script: "LiftPanel.as" })).structuredContent;
   assert(panel.valid && panel.inputSignals.includes("SelectFloor"));

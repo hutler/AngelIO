@@ -16,16 +16,21 @@ UAngelIOCheckCommandlet::UAngelIOCheckCommandlet()
 int32 UAngelIOCheckCommandlet::Main(const FString& Params)
 {
     FString Script, Report;
-    if (!FParse::Value(*Params, TEXT("Script="), Script) || !FParse::Value(*Params, TEXT("Report="), Report))
+    const bool bApiOnly = FParse::Param(*Params, TEXT("ApiOnly"));
+    if ((!bApiOnly && !FParse::Value(*Params, TEXT("Script="), Script)) || !FParse::Value(*Params, TEXT("Report="), Report))
     {
         UE_LOG(LogTemp, Error, TEXT("Expected -Script=<relative .as> -Report=<output.json>"));
         return 2;
     }
     FAngelIOProgram Program;
-    const bool bValid = Program.CompileFile(Script);
+    const bool bValid = bApiOnly ? Program.Compile(TEXT("API"), TEXT("void Run() {}")) : Program.CompileFile(Script);
     auto Root = MakeShared<FJsonObject>();
     Root->SetStringField(TEXT("script"), Script);
     Root->SetBoolField(TEXT("valid"), bValid);
+    TArray<TSharedPtr<FJsonValue>> Declarations;
+    for (const auto& Decl : Program.ExternalDeclarations())
+        Declarations.Add(MakeShared<FJsonValueString>(Decl));
+    Root->SetArrayField(TEXT("externalDeclarations"), Declarations);
     TArray<TSharedPtr<FJsonValue>> Ports, Diagnostics;
     for (const auto& P : Program.Ports())
     {

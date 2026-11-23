@@ -15,6 +15,14 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Demo")
     TObjectPtr<UAngelIOScriptComponent> Panel;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Demo")
+    TObjectPtr<UAngelIOScriptComponent> TripPanel;
+
+    UFUNCTION(Exec)
+    void LiftTrip(int32 Floor, float Speed);
+    UFUNCTION(Server, Reliable)
+    void ServerRequestTrip(int32 Floor, float Speed);
+
     UFUNCTION(Exec)
     void LiftFloor(int32 Floor);
     // An owned controller can request an interaction with a shared world actor.

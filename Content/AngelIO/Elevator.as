@@ -2,6 +2,7 @@
 int in_StartingFloor = 1;
 bool in_Enabled = true;
 float in_TravelSpeed = 240.0f;
+float in_CommandSpeed = 0.0f;
 int out_LastFloor;
 int out_TotalTrips;
 float out_TripSpeed;
@@ -19,7 +20,7 @@ void Run()
             continue;
 
         int requested = SignalValue();
-        out_TripSpeed = in_TravelSpeed;
+        out_TripSpeed = in_CommandSpeed > 0 ? in_CommandSpeed : in_TravelSpeed;
         Emit(OutputSignal::MoveTo, requested);
         WaitFor(InputSignal::MotionFinished);
         out_LastFloor = SignalValue();

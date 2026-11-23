@@ -1,5 +1,6 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "AngelIOExampleLift.h"
+#include "AngelIOLiftTrip.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "Tests/AngelIOTestSignalObserver.h"
@@ -82,12 +83,76 @@ bool FAngelIONamedTargets::RunTest(const FString&)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOOverlappingTrips, "AngelIO.Missions.OverlappingTrips",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOOverlappingTrips::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    auto* World = Scene.GetTestWorld();
+    auto* A = World->SpawnActor<AAngelIOExampleLift>();
+    auto* B = World->SpawnActor<AAngelIOExampleLift>();
+    if (!A || !B) return false;
+    A->bRequestOnStart = B->bRequestOnStart = false;
+    A->Address->SetTargetName(TEXT("Slow"));
+    B->Address->SetTargetName(TEXT("Fast"));
+    if (!Scene.BeginPlayInTestWorld()) return false;
+    FAngelIOProgram Caller;
+    const TCHAR* Script = TEXT(R"(
+        int out_SlowStatus = -1, out_FastStatus = -1;
+        int out_SlowFloor, out_FastFloor;
+        void Run() {
+            LiftTrip@ slow = FindLift("Slow").MoveTo(3, 100);
+            LiftTrip@ fast = FindLift("Fast").MoveTo(2, 800);
+            TripResult@ a = slow.Wait();
+            TripResult@ b = fast.Wait();
+            out_SlowStatus = int(a.Status);
+            out_SlowFloor = a.Floor;
+            out_FastStatus = int(b.Status);
+            out_FastFloor = b.Floor;
+        })");
+    if (!TestTrue(TEXT("Script starts two independent trips"), Caller.Compile(TEXT("overlap"), Script) &&
+        Caller.Start({}, World) && Caller.IsWaitingOnOperation())) return false;
+    for (int32 Frame = 0; Frame < 50; ++Frame) Scene.TickTestWorld(0.02f);
+    FAngelIOValue Value;
+    TestTrue(TEXT("Fast trip has arrived"), B->Mission->GetOutput(TEXT("LastFloor"), Value) && Value.Integer == 2);
+    TestFalse(TEXT("Fast arrival cannot resume slow wait"), Caller.ResumeCompletedOperation());
+    for (int32 Frame = 0; Frame < 200; ++Frame) Scene.TickTestWorld(0.02f);
+    TestTrue(TEXT("Slow arrival resumes the caller"), Caller.ResumeCompletedOperation());
+    TestEqual(TEXT("Both reads finish in one resume"), int(Caller.State()), int(EAngelIOState::Finished));
+    for (const auto& D : Caller.Diagnostics())
+        if (D.Severity == TEXT("error")) AddError(D.Message);
+    auto CheckResult = [&](const TCHAR* Name, int32 Expected)
+    {
+        if (TestTrue(Name, Caller.GetOutput(Name, Value))) TestEqual(Name, Value.Integer, Expected);
+    };
+    CheckResult(TEXT("SlowFloor"), 3);
+    CheckResult(TEXT("FastFloor"), 2);
+    CheckResult(TEXT("SlowStatus"), 0);
+    CheckResult(TEXT("FastStatus"), 0);
+    const double StartZ = A->GetActorLocation().Z;
+    auto SlowTrip = A->MoveTo(4, 0.001f);
+    for (int32 Frame = 0; Frame < 50; ++Frame) Scene.TickTestWorld(0.02f);
+    TestTrue(TEXT("Small per-frame movements accumulate"), A->GetActorLocation().Z > StartZ + 0.0005);
+    A->Mission->StopScript();
+    TestTrue(TEXT("Stopping the lift mission cancels its active trip"),
+        SlowTrip->IsComplete() && SlowTrip->Status == ELiftTripStatus::Cancelled);
+    Scene.ForwardErrorMessages(this);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCompiler, "AngelIO.Compiler.Contract",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FAngelIOCompiler::RunTest(const FString&)
 {
     FAngelIOProgram P;
+    TestTrue(TEXT("Typed lift contract"), P.CompileFile(TEXT("TypedLift.as")));
+    TestFalse(TEXT("MoveTo requires floor and speed"), P.Compile(TEXT("test"),
+        TEXT("void Run() { FindLift(\"A\").MoveTo(2); }")));
+    TestFalse(TEXT("MoveTo rejects a text floor"), P.Compile(TEXT("test"),
+        TEXT("void Run() { FindLift(\"A\").MoveTo(\"two\", 200.f); }")));
     TestFalse(TEXT("Missing entry point"), P.Compile(TEXT("test"), TEXT("void Other() {}")));
     TestFalse(TEXT("Unsupported public type"), P.Compile(TEXT("test"), TEXT("double in_X; void Run() {}")));
     TestFalse(TEXT("Duplicate signal IDs"), P.Compile(TEXT("test"), TEXT("enum InputSignal { A, B = 0 } void Run() {}")));

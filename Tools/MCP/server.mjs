@@ -61,27 +61,32 @@ server.registerTool("read_script", {
 
 server.registerTool("describe_api", {
   description: "Show the AngelIO entry point, variable conventions, VM calls and signal delivery rules.", annotations
-}, async () => result({
-  entry: "void Run()", portTypes: ["int", "float", "bool"],
-  inputs: "in_Name globals can be set by the component. out_Name globals are readable outputs.",
-  signals: "Declare InputSignal and OutputSignal enums at global scope. Use 32-bit enums with unique values.",
-  calls: [
-    "WaitFor(InputSignal value) suspends until this component receives that signal.",
-    "SendTo(const string &in target, const string &in input, int value) delivers to live components with this TargetName in the authoritative world.",
-    "int SignalValue() reads the last delivered integer payload.",
-    "Emit(OutputSignal name, int value) publishes after the next suspension or return."
-  ],
-  lifetime: "Each component owns its globals. An unmatched signal is dropped. StopScript and EndPlay cancel the instance.",
-  addressing: "TargetName is an explicit case-insensitive logical name. Equal names form a group. Input signal names are case-sensitive. No match means no delivery.",
-  network: "Standalone or server executes Run. Relevant clients observe replicated output values and waiting signal. OnSignal stays authoritative. Opted-in presentation signals are unreliable live effects; late joiners read current state."
-}));
+}, async () => {
+  const report = await validate();
+  if (!report.valid) throw new Error("AngelIO API registration failed: " + JSON.stringify(report.diagnostics));
+  return result({
+    externalDeclarations: report.externalDeclarations,
+    entry: "void Run()", portTypes: ["int", "float", "bool"],
+    inputs: "in_Name globals can be set by the component. out_Name globals are readable outputs.",
+    signals: "Declare InputSignal and OutputSignal enums at global scope. Use 32-bit enums with unique values.",
+    calls: [
+      "WaitFor(InputSignal value) suspends until this component receives that signal.",
+      "SendTo(const string &in target, const string &in input, int value) delivers to live components with this TargetName in the authoritative world.",
+      "int SignalValue() reads the last delivered integer payload.",
+      "Emit(OutputSignal name, int value) publishes after the next suspension or return."
+    ],
+    lifetime: "Each component owns its globals. An unmatched signal is dropped. StopScript and EndPlay cancel the instance.",
+    addressing: "TargetName is an explicit case-insensitive logical name. Equal names form a group. Input signal names are case-sensitive. No match means no delivery.",
+    network: "Standalone or server executes Run. Relevant clients observe replicated output values and waiting signal. OnSignal stays authoritative. Opted-in presentation signals are unreliable live effects; late joiners read current state."
+  });
+});
 
 async function validate(relative) {
   const dir = await mkdtemp(path.join(tmpdir(), "angelio-check-"));
   try {
     const report = path.join(dir, "report.json");
     try {
-      await exec(editor, [project, "-run=AngelIOCheck", "-Script=" + relative, "-Report=" + report,
+      await exec(editor, [project, "-run=AngelIOCheck", relative ? "-Script=" + relative : "-ApiOnly", "-Report=" + report,
         "-unattended", "-nullrhi", "-nosound", "-nop4", "-nosplash", "-ddc=InstalledNoZenLocalFallback",
         "-abslog=" + path.join(dir, "check.log")],
         { timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });

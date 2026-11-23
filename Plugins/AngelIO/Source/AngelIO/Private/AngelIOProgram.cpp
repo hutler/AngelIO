@@ -1,4 +1,7 @@
 #include "AngelIOProgram.h"
+#include "AngelIOScriptAPI.h"
+#include "Engine/World.h"
+#include "Features/IModularFeatures.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include <string_view>
@@ -7,6 +10,40 @@ THIRD_PARTY_INCLUDES_START
 #include "angelscript.h"
 #include "scriptstdstring.h"
 THIRD_PARTY_INCLUDES_END
+
+namespace
+{
+    struct FExecutionScope
+    {
+        TWeakObjectPtr<UWorld> World;
+        TSharedPtr<FAngelIOOperation> Pending;
+        FString Label;
+    };
+    constexpr asPWORD ExecutionKey = 0x41494F;
+}
+
+UWorld* AngelIO::GetScriptWorld()
+{
+    auto* Context = asGetActiveContext();
+    auto* Scope = Context ? static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey)) : nullptr;
+    return Scope ? Scope->World.Get() : nullptr;
+}
+
+void AngelIO::AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FString& Label)
+{
+    auto* Context = asGetActiveContext();
+    if (!Context) return;
+    auto* Scope = static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey));
+    if (!Scope || !Scope->World.IsValid())
+    {
+        Context->SetException("AwaitOperation requires a world-backed mission in Run");
+        return;
+    }
+    if (Operation->IsComplete()) return;
+    Scope->Pending = Operation;
+    Scope->Label = Label.IsEmpty() ? TEXT("Operation") : Label;
+    Context->Suspend();
+}
 
 struct FAngelIOProgram::FImpl
 {
@@ -17,6 +54,8 @@ struct FAngelIOProgram::FImpl
     TArray<FAngelIOPort> PublicPorts;
     TMap<int32, FString> Inputs, Outputs;
     TArray<FAngelIOEvent> Events;
+    FExecutionScope Scope;
+    TArray<FString> ExternalAPI;
     EAngelIOState Status = EAngelIOState::Empty;
     FString Waiting;
     int32 Payload = 0;
@@ -201,8 +240,11 @@ struct FAngelIOProgram::FImpl
         Status = EAngelIOState::Running;
         Steps = 0;
         bInRun = true;
+        Context->SetUserData(&Scope, ExecutionKey);
         const int Code = Context->Execute();
+        Context->SetUserData(nullptr, ExecutionKey);
         bInRun = false;
+        if (Scope.Pending) Waiting = Scope.Label;
         if (Code == asEXECUTION_FINISHED)
             Status = EAngelIOState::Finished;
         else if (Code == asEXECUTION_SUSPENDED && !Waiting.IsEmpty())
@@ -262,6 +304,37 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
         S.Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
         return S.Fail(TEXT("Could not register AngelIO script API"));
+    auto& Engine = *S.Engine;
+    const auto FirstFunction = Engine.GetGlobalFunctionCount();
+    const auto FirstType = Engine.GetObjectTypeCount();
+    const auto FirstEnum = Engine.GetEnumCount();
+    for (auto* Provider : IModularFeatures::Get().GetModularFeatureImplementations<IAngelIOScriptAPI>(
+        IAngelIOScriptAPI::FeatureName()))
+    {
+        if (!Provider->RegisterBindings(Engine) || Engine.SetDefaultNamespace("") < 0)
+            return S.Fail(TEXT("Could not register external AngelIO script bindings"));
+    }
+    for (asUINT I = FirstFunction; I < Engine.GetGlobalFunctionCount(); ++I)
+        S.ExternalAPI.Add(UTF8_TO_TCHAR(Engine.GetGlobalFunctionByIndex(I)->GetDeclaration(true, true, true)));
+    for (asUINT I = FirstType; I < Engine.GetObjectTypeCount(); ++I)
+    {
+        auto* Type = Engine.GetObjectTypeByIndex(I);
+        S.ExternalAPI.Add(UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)));
+        for (asUINT M = 0; M < Type->GetMethodCount(); ++M)
+            S.ExternalAPI.Add(UTF8_TO_TCHAR(Type->GetMethodByIndex(M)->GetDeclaration(true, true, true)));
+    }
+    for (asUINT I = FirstEnum; I < Engine.GetEnumCount(); ++I)
+    {
+        auto* Type = Engine.GetEnumByIndex(I);
+        TArray<FString> Names;
+        for (asUINT N = 0; N < Type->GetEnumValueCount(); ++N)
+        {
+            asINT64 Value;
+            Names.Add(UTF8_TO_TCHAR(Type->GetEnumValueByIndex(N, &Value)));
+        }
+        S.ExternalAPI.Add(FString::Printf(TEXT("enum %s { %s }"),
+            UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)), *FString::Join(Names, TEXT(", "))));
+    }
     S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
     FTCHARToUTF8 SourceBytes(*Source);
     S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
@@ -275,10 +348,12 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     return true;
 }
 
-bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs)
+bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World)
 {
     auto& S = *Impl;
     if (S.Status != EAngelIOState::Compiled) return false;
+    if (World && World->GetNetMode() == NM_Client) return S.Fail(TEXT("Mission requires authority"));
+    S.Scope.World = World;
     S.Context = S.Engine->CreateContext();
     if (!S.Context) return S.Fail(TEXT("Could not create execution context"));
     S.Context->SetUserData(&S);
@@ -333,12 +408,26 @@ bool FAngelIOProgram::GetOutput(const FString& Name, FAngelIOValue& Value) const
 bool FAngelIOProgram::Signal(const FString& Name, int32 Value)
 {
     auto& S = *Impl;
-    if (S.Status != EAngelIOState::Waiting || !S.Waiting.Equals(Name, ESearchCase::CaseSensitive)) return false;
+    if (S.Status != EAngelIOState::Waiting || S.Scope.Pending || !S.Waiting.Equals(Name, ESearchCase::CaseSensitive)) return false;
     S.Waiting.Reset();
     S.Payload = Value;
     return S.Execute();
 }
 
+bool FAngelIOProgram::IsWaitingOnOperation() const
+{
+    return Impl->Status == EAngelIOState::Waiting && Impl->Scope.Pending.IsValid();
+}
+
+bool FAngelIOProgram::ResumeCompletedOperation()
+{
+    if (!IsWaitingOnOperation() || !Impl->Scope.Pending->IsComplete()) return false;
+    Impl->Scope.Pending.Reset();
+    Impl->Waiting.Reset();
+    return Impl->Execute();
+}
+
+const TArray<FString>& FAngelIOProgram::ExternalDeclarations() const { return Impl->ExternalAPI; }
 const TArray<FAngelIOPort>& FAngelIOProgram::Ports() const { return Impl->PublicPorts; }
 const TMap<int32, FString>& FAngelIOProgram::Signals(bool bIncoming) const { return bIncoming ? Impl->Inputs : Impl->Outputs; }
 const TArray<FAngelIODiagnostic>& FAngelIOProgram::Diagnostics() const { return Impl->Messages; }
