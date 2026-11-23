@@ -2,6 +2,8 @@
 
 AngelIO is an Unreal Engine plugin for writing level logic in AngelScript. A mission can find level actors by name, call typed functions supplied by game modules, and wait for a particular operation to finish. The editor and the packaged game use the same runtime to compile UTF-8 `.as` files from `Content/AngelIO`. The included demo targets Unreal Engine 5.8.4 on Windows x64.
 
+For LLM agents and contributors, the [agent guide](Docs/AgentGuide.md) walks through a mission change, a native async operation, and a listen-server investigation with MCP and the PIE inspector. [Repository workflow](AGENTS.md)
+
 ## Run the two-lift demo
 
 Open [AngelIO.uproject](AngelIO.uproject) with Unreal Engine 5.8, build the C++ modules if prompted, and press **Play** on the default map, `/Game/Demo/TwoLifts`. Each platform runs its own instance of `Elevator.as`. The lifts start on floor 1 and travel to floors 2 and 3. Each floor is 200 cm apart and the default speed is 240 cm/s.
@@ -178,7 +180,7 @@ To generate the same JSON report from PowerShell or CI, run the commandlet from 
 
 ```powershell
 $editor = 'E:/DEV/UEBASE/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe'
-& $editor "$PWD/AngelIO.uproject" -run=AngelIOCheck -Script=Elevator.as "-Report=$env:TEMP/angelio.json" -unattended -nullrhi -ddc=InstalledNoZenLocalFallback
+& $editor "$PWD/AngelIO.uproject" -run=AngelIOCheck '-Script=Elevator.as' "-Report=$env:TEMP/angelio.json" -unattended -nullrhi -ddc=InstalledNoZenLocalFallback
 ```
 
 Run the `AngelIO.` filter in Unreal Automation for the full regression suite. The `AngelIO.Network.ListenServer` filter selects the networked PIE tests.
