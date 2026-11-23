@@ -1,0 +1,4 @@
+* text=auto
+*.umap binary
+*.uasset binary
+*.lib binary
