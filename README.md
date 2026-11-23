@@ -6,10 +6,12 @@ For LLM agents and contributors, the [agent guide](Docs/AgentGuide.md) walks thr
 
 ## Illustrated user handbooks
 
-| Handbook | English PDF | Русский PDF |
+| Handbook | Download PDF (English) | Скачать PDF (русский) |
 | --- | --- | --- |
-| Engineers · Build the plugin, expose a typed operation, and trace a networked ride | [Engineering handbook](Docs/Guides/Engineering-EN.pdf) | [Для инженеров](Docs/Guides/Engineering-RU.pdf) |
-| Level designers · Tune the two-lift map, wire a Blueprint button, and playtest with a client | [Level design handbook](Docs/Guides/Level-Design-EN.pdf) | [Для левел-дизайнеров](Docs/Guides/Level-Design-RU.pdf) |
+| Engineers · Build the plugin, expose a typed operation, and trace a networked ride | [Engineering handbook](Docs/Guides/Engineering-EN.pdf?raw=1) | [Для инженеров](Docs/Guides/Engineering-RU.pdf?raw=1) |
+| Level designers · Tune the two-lift map, wire a Blueprint button, and playtest with a client | [Level design handbook](Docs/Guides/Level-Design-EN.pdf?raw=1) | [Для левел-дизайнеров](Docs/Guides/Level-Design-RU.pdf?raw=1) |
+
+Open the downloaded PDF to follow its links. You can also open the script from page 5 here. [Platform movement script / Скрипт движения платформы (Elevator.as)](Content/AngelIO/Elevator.as)
 
 ## Run the two-lift demo
 
