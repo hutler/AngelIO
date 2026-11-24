@@ -10,7 +10,7 @@
 
 namespace
 {
-    bool BindMission(FSQLitePreparedStatement& Statement, const UActorComponent& Component, FString Script)
+    bool BindComponentKey(FSQLitePreparedStatement& Statement, const UActorComponent& Component, const FString& Key)
     {
         const ULevel* Level = Component.GetOwner()->GetLevel();
         const UWorld* World = Component.GetWorld();
@@ -22,11 +22,16 @@ namespace
         };
         const FString Room = Package(Stream ? Stream->GetWorldAssetPackageName() : Level->GetOutermost()->GetName());
         const FString Owner = Room + TEXT(":") + Component.GetPathName(Level);
-        FPaths::NormalizeFilename(Script);
-        FPaths::CollapseRelativeDirectories(Script);
         return Statement.IsValid() &&
             Statement.SetBindingValueByIndex(1, Package(World->GetOutermost()->GetName()).ToLower()) &&
-            Statement.SetBindingValueByIndex(2, Owner.ToLower()) && Statement.SetBindingValueByIndex(3, Script.ToLower());
+            Statement.SetBindingValueByIndex(2, Owner.ToLower()) && Statement.SetBindingValueByIndex(3, Key.ToLower());
+    }
+
+    bool BindMission(FSQLitePreparedStatement& Statement, const UActorComponent& Component, FString Script)
+    {
+        FPaths::NormalizeFilename(Script);
+        FPaths::CollapseRelativeDirectories(Script);
+        return BindComponentKey(Statement, Component, Script);
     }
 }
 
@@ -54,7 +59,10 @@ bool UAngelIOCheckpointSubsystem::Open(FString& Error, bool bInspectOnly)
         !Database.Execute(TEXT("CREATE TABLE IF NOT EXISTS checkpoints (")
             TEXT("map TEXT NOT NULL, owner TEXT NOT NULL, script TEXT NOT NULL, id BLOB NOT NULL, ")
             TEXT("writer BLOB NOT NULL, version INTEGER NOT NULL CHECK(version > 0), stage BLOB NOT NULL, ")
-            TEXT("PRIMARY KEY(map, owner, script)) WITHOUT ROWID")))
+            TEXT("PRIMARY KEY(map, owner, script)) WITHOUT ROWID")) ||
+        !Database.Execute(TEXT("CREATE TABLE IF NOT EXISTS component_state (")
+            TEXT("map TEXT NOT NULL, owner TEXT NOT NULL, key TEXT NOT NULL, data BLOB NOT NULL CHECK(length(data)>0), ")
+            TEXT("PRIMARY KEY(map,owner,key)) WITHOUT ROWID")))
     {
         Error = TEXT("Could not initialize checkpoint store: ") + Database.GetLastError();
         Database.Close();
@@ -108,6 +116,30 @@ bool UAngelIOCheckpointSubsystem::Save(const UActorComponent& Component, const F
         Write.Step() == ESQLitePreparedStatementStepResult::Done)
         return true;
     Error = TEXT("Could not commit mission checkpoint: ") + Database.GetLastError();
+    return false;
+}
+
+bool UAngelIOCheckpointSubsystem::LoadState(const UActorComponent& Component, const FString& Key, TArray<uint8>& Data, FString& Error)
+{
+    if (!Open(Error, false)) return false;
+    auto Query = Database.PrepareStatement(TEXT("SELECT data FROM component_state WHERE map=?1 AND owner=?2 AND key=?3"));
+    if (BindComponentKey(Query, Component, Key))
+    {
+        const auto Result = Query.Step();
+        if (Result == ESQLitePreparedStatementStepResult::Done) return true;
+        if (Result == ESQLitePreparedStatementStepResult::Row && Query.GetColumnValueByIndex(0, Data) && !Data.IsEmpty()) return true;
+    }
+    Error = TEXT("Could not read component state: ") + Database.GetLastError();
+    return false;
+}
+
+bool UAngelIOCheckpointSubsystem::SaveState(const UActorComponent& Component, const FString& Key, TConstArrayView<uint8> Data, FString& Error)
+{
+    if (!Open(Error, false)) return false;
+    auto Write = Database.PrepareStatement(TEXT("INSERT INTO component_state(map,owner,key,data) VALUES(?1,?2,?3,?4) ")
+        TEXT("ON CONFLICT(map,owner,key) DO UPDATE SET data=excluded.data"));
+    if (BindComponentKey(Write, Component, Key) && Write.SetBindingValueByIndex(4, Data) && Write.Execute()) return true;
+    Error = TEXT("Could not commit component state: ") + Database.GetLastError();
     return false;
 }
 

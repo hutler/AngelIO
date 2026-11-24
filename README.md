@@ -15,7 +15,7 @@ Open the downloaded PDF to follow its links. You can also open the script from p
 
 ## Run the two-lift demo
 
-Open [AngelIO.uproject](AngelIO.uproject) with Unreal Engine 5.8, build the C++ modules if prompted, and press **Play** on the default map, `/Game/Demo/TwoLifts`. Each platform runs its own instance of `Elevator.as`. The lifts start on floor 1 and travel to floors 2 and 3. Each floor is 200 cm apart and the default speed is 240 cm/s.
+Open [AngelIO.uproject](AngelIO.uproject) with Unreal Engine 5.8, build the C++ modules if prompted, and press **Play** on the default map, `/Game/Demo/TwoLifts`. Each platform runs its own instance of `Elevator.as`. In a fresh save slot the lifts start on floor 1 and travel to floors 2 and 3. On later runs they start at their last completed landings. Each floor is 200 cm apart and the default speed is 240 cm/s.
 
 Once the platforms stop, try either command in the player console. Both work from the listen-server host and from a connected player.
 
@@ -53,7 +53,7 @@ Each `MoveTo` call returns its own trip handle. A script can start multiple trip
 | --- | --- |
 | `TripStatus::Arrived` | The platform reached the requested floor. |
 | `TripStatus::Rejected` | The lift is busy, disabled, or unready, the floor is outside 1–8, or the speed is not a finite positive number. |
-| `TripStatus::Cancelled` | The lift was destroyed or its mission stopped during the ride. |
+| `TripStatus::Cancelled` | The lift left play, its mission stopped during the ride, or the host could not save the landing (`LandingSaveFailed` in the trace). |
 | `TripStatus::TimedOut` | This reader's deadline expired while the ride was still pending. The lift continues moving. |
 
 `trip.Id` and `result.Id` return the same operation ID as a string. Use it to look up the ride in an exported trace.
@@ -81,7 +81,7 @@ TripResult@ ride = lift.MoveTo(6, 800.0f).Wait();
 
 When streaming removes the lift from play during a ride, the persistent caller receives `Cancelled` and the trace records `TargetUnloaded`. Its cached `Lift@` expires at that boundary. Showing the same room again requires a fresh lookup even if Unreal reuses the actor in memory. A mission attached to the streamed room itself ends with its component and starts from `Run` on re-entry when **Start On Begin Play** is enabled.
 
-The demo lift restores its starting position relative to the room when it re-enters play. An interrupted ride therefore keeps the building's floor heights aligned on the host and client.
+With **Persist Landing** enabled (the default), each demo lift saves its floor and cab height relative to its placement as soon as it arrives. After a room reload or a server restart using the same slot, the host places the cab at its last landing and replicates its position and `LastFloor` to clients. The lift waits for a new request. Interrupting a ride leaves the previous landing intact.
 
 Set **Target Name** on an Angel IO Script Component in the Details panel. This logical name is independent of the actor's Outliner label. A shared name lets a mission send a signal to a group.
 
@@ -131,7 +131,7 @@ Call `SaveCheckpoint("Delivered", 1)` after the delivery succeeds. On the next a
 
 In the two-lift map, add a script component to a replicated actor in the streamed room and assign `Examples/RoomDelivery.as`. Send `Dispatch` on the server. The script waits for the freight lift to arrive on floor 4, commits `Delivered` and publishes `out_Stage = 1`. Unload and reload the room. The component now waits for `Confirm`. Sending that signal commits `Complete` and publishes stage 2, which clients also see on a later reload or late join. [Delivery mission](Content/AngelIO/Examples/RoomDelivery.as)
 
-The host commits each stage to disk before `SaveCheckpoint` returns, using Unreal's bundled SQLiteCore plugin. Restart the listen server on the same map and slot, then load the room with the same instance name. `RoomDelivery.as` resumes at `Delivered` and waits for `Confirm`, or finishes immediately if it already saved `Complete`. A checkpoint stores mission progress. Lift transforms and other actor state follow the game's own persistence rules.
+The host commits each stage to disk before `SaveCheckpoint` returns, using Unreal's bundled SQLiteCore plugin. Restart the listen server on the same map and slot, then load the room with the same instance name. The freight lift is already on floor 4. `RoomDelivery.as` resumes at `Delivered` and waits for `Confirm`, or finishes immediately if it already saved `Complete`. In older slots that contain only mission checkpoints, each lift uses its authored starting configuration until it first saves a landing.
 
 The default slot is `Default`. To start a separate campaign, open the host map with a different slot, for example `/Game/Demo/TwoLifts?listen?AngelIOCheckpointSlot=Campaign2`. The host stores it under `Saved/AngelIO/Checkpoints/Game/slot-Campaign2.sqlite3`. PIE uses the sibling `PIE` directory. For a session-only playtest, use an explicitly empty `?AngelIOCheckpointSlot=`. Keep the root map, level-instance name, actor/component object name and script path stable. Bump the checkpoint version when old stages become incompatible.
 
@@ -167,7 +167,7 @@ The editor checks the open map, including unsaved edits. MCP checks the saved pa
 
 ## Inspect a mission during PIE
 
-Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the demo with **Play As Listen Server**, two players and **Run Under One Process**. Wait for the initial rides to finish, then enter `LiftTrip 6 100` in the client's console.
+Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the demo with **Play As Listen Server**, two players and **Run Under One Process**. Use a fresh slot for this walkthrough. Wait for the initial rides to finish, then enter `LiftTrip 6 100` in the client's console.
 
 1. Select the **Listen server** world and the remote player's **TripPanel** mission. The inspector shows the source file and line of the current wait, its signal or operation name, and the ID of the awaited ride.
 2. Select **FreightLift / Mission**. Its script waits for `MotionFinished` in `Elevator.as`. The operation history follows the same ride that the panel is waiting for. The list includes call arguments, caller and waiter sites, completion status, rejection or cancellation reason, and resumption.
@@ -245,7 +245,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
 | `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
 | `MissionCheckpoints` | Interrupts and retries a delivery, reloads both committed stages, checks exactly one arrival and verifies the late client's state and a second room's independent progress. |
-| `CheckpointRestart` | Commits a delivery on a listen server, starts a second host and client on the same slot, and verifies confirmation with zero repeated delivery calls. |
+| `CheckpointRestart` | Restarts a host and client on the same slot. Both peers see floor 4 and the cab at its measured fourth-floor position. The mission accepts confirmation with zero new trips or delivery calls. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.

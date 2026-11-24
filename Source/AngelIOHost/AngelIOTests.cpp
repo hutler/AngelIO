@@ -24,6 +24,7 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
     UWorld* World = Scene.GetTestWorld();
     auto* Lift = World->SpawnActor<AAngelIOExampleLift>();
     if (!Lift) return false;
+    Lift->bPersistLanding = false;
     Lift->bRequestOnStart = false;
     if (!Scene.BeginPlayInTestWorld()) return false;
     World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
@@ -89,7 +90,9 @@ bool FAngelIOCheckpointDiskErrors::RunTest(const FString&)
     if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
     UWorld* World = Scene.GetTestWorld();
     auto* Lift = World->SpawnActor<AAngelIOExampleLift>();
-    if (!Lift || !Scene.BeginPlayInTestWorld()) return false;
+    if (!Lift) return false;
+    Lift->bPersistLanding = false;
+    if (!Scene.BeginPlayInTestWorld()) return false;
     World->URL.AddOption(*(TEXT("AngelIOCheckpointSlot=") + Slot));
     for (const TCHAR* Body : {TEXT("LoadCheckpoint();"), TEXT("SaveCheckpoint(\"Complete\");")})
     {
@@ -115,6 +118,7 @@ bool FAngelIOLifts::RunTest(const FString&)
     auto* A = Scene.GetTestWorld()->SpawnActor<AAngelIOExampleLift>();
     auto* B = Scene.GetTestWorld()->SpawnActor<AAngelIOExampleLift>();
     if (!A || !B) return false;
+    A->bPersistLanding = B->bPersistLanding = false;
     A->bRequestOnStart = B->bRequestOnStart = false;
     FAngelIOValue StartFloor;
     StartFloor.Integer = 4;
@@ -193,6 +197,7 @@ bool FAngelIOOverlappingTrips::RunTest(const FString&)
     auto* A = World->SpawnActor<AAngelIOExampleLift>();
     auto* B = World->SpawnActor<AAngelIOExampleLift>();
     if (!A || !B) return false;
+    A->bPersistLanding = B->bPersistLanding = false;
     A->bRequestOnStart = B->bRequestOnStart = false;
     A->Address->SetTargetName(TEXT("Slow"));
     B->Address->SetTargetName(TEXT("Fast"));

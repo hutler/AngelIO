@@ -50,7 +50,7 @@ bool AtFloor(UWorld* World, int32 StartupFloor, int32 Floor, int32 Trips)
     FAngelIOValue Current, Count, Speed;
     return Lift && Lift->Mission->GetOutput(TEXT("LastFloor"), Current) && Current.Integer == Floor &&
         Lift->Mission->GetOutput(TEXT("TotalTrips"), Count) && Count.Integer == Trips &&
-        Lift->Mission->GetOutput(TEXT("TripSpeed"), Speed) && Speed.Float > 0 &&
+        Lift->Mission->GetOutput(TEXT("TripSpeed"), Speed) && (Trips ? Speed.Float > 0 : Speed.Float == 0) &&
         Lift->Mission->GetWaitingSignal() == TEXT("RequestFloor");
 }
 
@@ -66,7 +66,9 @@ struct FListenPeers
     TStrongObjectPtr<UAngelIOTestSignalObserver> HostProbe{NewObject<UAngelIOTestSignalObserver>()};
     TStrongObjectPtr<UAngelIOTestSignalObserver> ClientProbe{NewObject<UAngelIOTestSignalObserver>()};
 };
-void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"))
+TUniquePtr<TGuardValue<FString>> ListenPlayURL;
+
+void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"), const FString& Slot = FString())
 {
     auto* Settings = NewObject<ULevelEditorPlaySettings>();
     Settings->SetPlayNetMode(EPlayNetMode::PIE_ListenServer);
@@ -78,6 +80,7 @@ void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"))
     Params.EditorPlaySettings = Settings;
     Params.GlobalMapOverride = Map;
     Params.bAllowOnlineSubsystem = false;
+    ListenPlayURL = MakeUnique<TGuardValue<FString>>(GEditor->UserEditedPlayWorldURL, FString(Map) + TEXT("?AngelIOCheckpointSlot=") + Slot);
     GEditor->RequestPlaySession(Params);
 }
 
@@ -94,7 +97,12 @@ auto ListenSteps(FAutomationTestBase* Test)
 void EndListenSession()
 {
     ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([] { GEditor->RequestEndPlayMap(); return true; }));
-    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand([] { return !GEditor->PlayWorld; }, 15.f));
+    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand([]
+    {
+        if (GEditor->PlayWorld) return false;
+        ListenPlayURL.Reset();
+        return true;
+    }, 15.f));
 }
 
 bool TripOutput(UAngelIOScriptComponent* Panel, const TCHAR* Name, int32 Expected)
@@ -372,7 +380,7 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
     Steps(TEXT("a new lifetime on the same UObject requires a fresh handle"), [this, Room]
     {
         auto* Host = FindPeer(NM_ListenServer);
-        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+        if (!AtFloor(Host, 2, 2, 0) || !AtFloor(FindPeer(NM_Client), 2, 2, 0)) return false;
         TestTrue(TEXT("Unreal reused the hidden actor"), Room->Original.IsValid() && Room->Original.Get() == FindLift(Host, 2));
         TestTrue(TEXT("Floor two stays at its original height after showing the room"),
             FindLift(Host, 2)->GetActorLocation().Equals(Room->FloorTwoLocation, 0.1));
@@ -399,7 +407,7 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
     });
     Steps(TEXT("resolve the reloaded actor and start another ride"), [this, Room]
     {
-        if (!AtFloor(FindPeer(NM_ListenServer), 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+        if (!AtFloor(FindPeer(NM_ListenServer), 2, 2, 0) || !AtFloor(FindPeer(NM_Client), 2, 2, 0)) return false;
         TestTrue(TEXT("New ride awaits completion"), Room->Caller.Signal(TEXT("Reloaded"), 0) && Room->Caller.IsWaitingOnOperation());
         return true;
     });
@@ -407,7 +415,7 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
     {
         auto* Host = FindPeer(NM_ListenServer);
         Room->Caller.ResumeCompletedOperation();
-        if (!AtFloor(Host, 2, 6, 2) || !AtFloor(FindPeer(NM_Client), 2, 6, 2)) return false;
+        if (!AtFloor(Host, 2, 6, 1) || !AtFloor(FindPeer(NM_Client), 2, 6, 1)) return false;
         const FVector FloorSix = Room->FloorTwoLocation + FVector(0, 0, 4 * 200);
         TestTrue(TEXT("Reloaded lift arrives at the physical sixth floor"), FindLift(Host, 2)->GetActorLocation().Equals(FloorSix, 0.1));
         if (!FindLift(FindPeer(NM_Client), 2)->GetActorLocation().Equals(FloorSix, 1)) return false;
@@ -526,7 +534,7 @@ bool FAngelIOWaitActorListen::RunTest(const FString&)
     });
     Steps(TEXT("client sees floor four and the trace explains all three waits"), [this, S]
     {
-        if (!TripOutput(S->Client->TripPanel, TEXT("Completed"), 3) || !AtFloor(S->Client->GetWorld(), 2, 4, 2)) return false;
+        if (!TripOutput(S->Client->TripPanel, TEXT("Completed"), 3) || !AtFloor(S->Client->GetWorld(), 2, 4, 1)) return false;
         TestTrue(TEXT("Reloaded actor completed the new ride"), TripOutput(S->Client->TripPanel, TEXT("LastFloor"), 4) &&
             TripOutput(S->Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Arrived)));
         TSet<FString> Requests;
@@ -599,7 +607,6 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         auto* Host = FindPeer(NM_ListenServer);
         auto* Client = FindPeer(NM_Client);
         if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
-        Host->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
         Room->Host = LoadLiftRoom(Host, false);
         Room->Client = LoadLiftRoom(Client, false);
         TestTrue(TEXT("Created room on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
@@ -791,13 +798,14 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
     {
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
         FGuid CheckpointId;
+        FVector FloorFourLocation;
     };
     const auto Session = MakeShared<FSession>();
     auto Start = [&]
     {
-        Steps(TEXT("start a fresh listen server"), []
+        Steps(TEXT("start a fresh listen server"), [Slot]
         {
-            StartListenSession(TEXT("/Engine/Maps/Entry"));
+            StartListenSession(TEXT("/Engine/Maps/Entry"), Slot);
             return true;
         });
         Steps(TEXT("load delivery room on connected peers"), [this, Session, Slot]
@@ -805,7 +813,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             UWorld* Host = FindPeer(NM_ListenServer);
             UWorld* Client = FindPeer(NM_Client);
             if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
-            Host->URL.AddOption(*(TEXT("AngelIOCheckpointSlot=") + Slot));
+            if (!TestEqual(TEXT("Authority started in the isolated slot"), FString(Host->URL.GetOption(TEXT("AngelIOCheckpointSlot="), TEXT("missing"))), Slot)) return true;
             Session->Host = LoadLiftRoom(Host, false);
             Session->Client = LoadLiftRoom(Client, false);
             TestTrue(TEXT("Both peers created their streamed room"), Session->Host.IsValid() && Session->Client.IsValid());
@@ -814,13 +822,35 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
         Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session]
         {
             auto* Panel = DeliveryPanel(Session->Host.Get());
-            if (!Panel || !Session->Client->GetLoadedLevel()) return false;
+            auto* FreightAddress = DeliveryPanel(Session->Host.Get(), 2);
+            if (!Panel || !FreightAddress || !Session->Client->GetLoadedLevel()) return false;
+            auto* Freight = CastChecked<AAngelIOExampleLift>(FreightAddress->GetOwner());
+            FAngelIOValue StartFloor;
+            StartFloor.Integer = 3;
+            Freight->Mission->InitialInputs.Add(TEXT("StartingFloor"), StartFloor);
+            // The root's serialized placement is available before its world transform is registered.
+            const FVector Placement = Freight->GetRootComponent()->GetRelativeLocation();
+            Session->FloorFourLocation = Session->Host->LevelTransform.TransformPosition(Placement) + FVector(0, 0, 200);
             Panel->Script = TEXT("Examples/RoomDelivery.as");
             Panel->bStartOnBeginPlay = true;
             Session->Host->SetShouldBeVisible(true);
             Session->Client->SetShouldBeVisible(true);
             return true;
         });
+    };
+    auto BothAtFloorFour = [this, Session](int32 Trips)
+    {
+        for (ENetMode Peer : {NM_ListenServer, NM_Client})
+        {
+            auto* World = FindPeer(Peer);
+            if (!AtFloor(World, 2, 4, Trips)) return false;
+            const FVector Cab = FindLift(World, 2)->GetActorLocation();
+            if (Peer == NM_ListenServer)
+                TestTrue(*FString::Printf(TEXT("Host cab at %s matches floor four at %s"), *Cab.ToString(),
+                    *Session->FloorFourLocation.ToString()), Cab.Equals(Session->FloorFourLocation, 1.0));
+            else if (!Cab.Equals(Session->FloorFourLocation, 1.0)) return false;
+        }
+        return true;
     };
     auto CheckHistory = [this](int32 ExpectedTrips, const TCHAR* ExpectedEvent)
     {
@@ -849,11 +879,11 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             TestTrue(TEXT("Dispatch accepted"), DeliveryPanel(Session->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
             return true;
         });
-        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory]
+        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory, BothAtFloorFour]
         {
             auto* Client = DeliveryPanel(Session->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1) ||
-                !AtFloor(FindPeer(NM_Client), 2, 4, 2)) return false;
+                !BothAtFloorFour(2) || !AtFloor(FindPeer(NM_Client), 3, 3, 1)) return false;
             Session->CheckpointId = DeliveryPanel(Session->Host.Get())->InspectMission().CheckpointId;
             TestTrue(TEXT("Slot exists before teardown"), FPaths::FileExists(File) && Session->CheckpointId.IsValid());
             CheckHistory(1, TEXT("checkpointSaved"));
@@ -875,9 +905,13 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             TestTrue(TEXT("Recreated mission can finish"), Panel->SendSignal(TEXT("Confirm"), 0));
             return true;
         });
-        Steps(TEXT("client sees completion with only the lift's normal startup motion"), [Session, CheckHistory]
+        Steps(TEXT("both peers see the restored fourth-floor cab without a startup or delivery ride"), [this, Session, CheckHistory, BothAtFloorFour]
         {
-            if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+            if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !BothAtFloorFour(0) ||
+                !AtFloor(FindPeer(NM_Client), 3, 3, 0)) return false;
+            AddInfo(FString::Printf(TEXT("Restored floor 4: host %s, client %s, zero completed trips on both peers"),
+                *FindLift(FindPeer(NM_ListenServer), 2)->GetActorLocation().ToString(),
+                *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
             CheckHistory(0, TEXT("checkpointRestored"));
             return true;
         });

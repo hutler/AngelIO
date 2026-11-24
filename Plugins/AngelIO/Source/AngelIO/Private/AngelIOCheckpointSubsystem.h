@@ -24,6 +24,8 @@ public:
     // Version zero denotes a missing row. A storage error must never start a mission fresh.
     bool Load(const UActorComponent& Component, const FString& Script, FCheckpoint& Out, FString& Error, bool bInspectOnly = false);
     bool Save(const UActorComponent& Component, const FString& Script, FCheckpoint& Record, FString& Error);
+    bool LoadState(const UActorComponent& Component, const FString& Key, TArray<uint8>& Data, FString& Error);
+    bool SaveState(const UActorComponent& Component, const FString& Key, TConstArrayView<uint8> Data, FString& Error);
 
 private:
     bool Open(FString& Error, bool bInspectOnly);

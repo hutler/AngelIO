@@ -22,6 +22,10 @@ public:
     UPROPERTY(EditInstanceOnly, Category="Demo")
     bool bRequestOnStart = true;
 
+    // Restore the last completed landing from this host's checkpoint slot.
+    UPROPERTY(EditInstanceOnly, Category="Demo")
+    bool bPersistLanding = true;
+
     UPROPERTY(EditInstanceOnly, Category="Demo")
     int32 RequestedFloor = 2;
 
@@ -42,11 +46,14 @@ private:
     UFUNCTION()
     void CheckMotionState();
     bool AtDestination() const;
+    void FinishMotion();
+    bool LoadLanding(TOptional<int32>& Floor, FString& Error);
 
     TSharedPtr<FLiftTrip> ActiveTrip;
     uint64 PlayGeneration = 0;
     TOptional<FVector> StartPositionInLevel;
 
+    double PlacementZ = 0;
     double OriginZ = 0;
     double DestinationZ = 0;
     double StartZ = 0;

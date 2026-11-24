@@ -5,6 +5,8 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/LevelStreaming.h"
 #include "LevelUtils.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
 #include "UObject/ConstructorHelpers.h"
 
 AAngelIOExampleLift::AAngelIOExampleLift()
@@ -27,10 +29,42 @@ AAngelIOExampleLift::AAngelIOExampleLift()
     Address->bStartOnBeginPlay = false;
 }
 
+namespace
+{
+    const FString LandingKey = TEXT("AngelIOHost.LiftLanding.v1");
+}
+
+bool AAngelIOExampleLift::LoadLanding(TOptional<int32>& Floor, FString& Error)
+{
+    TArray<uint8> Bytes;
+    if (!Mission->LoadComponentState(LandingKey, Bytes, Error)) return false;
+    if (Bytes.IsEmpty()) return true;
+    if (Bytes.Num() != sizeof(int32) + sizeof(double))
+    {
+        Error = TEXT("Invalid saved lift landing size");
+        return false;
+    }
+    FMemoryReader Reader(Bytes);
+    int32 LandedFloor = 0;
+    double OffsetZ = 0;
+    Reader << LandedFloor << OffsetZ;
+    if (Reader.IsError() || !Reader.AtEnd() || !FMath::IsFinite(OffsetZ))
+    {
+        Error = TEXT("Invalid saved lift landing");
+        return false;
+    }
+    FVector Location = GetActorLocation();
+    Location.Z = PlacementZ + OffsetZ;
+    SetActorLocation(Location, false, nullptr, ETeleportType::TeleportPhysics);
+    Floor = LandedFloor;
+    return true;
+}
+
 void AAngelIOExampleLift::BeginPlay()
 {
-    // The mission restarts at its configured floor on every level activation.
-    if (HasAuthority() && GetNetMode() != NM_Client)
+    const bool bServer = HasAuthority() && GetNetMode() != NM_Client;
+    TOptional<int32> RestoredFloor;
+    if (bServer)
     {
         if (const auto* Stream = FLevelUtils::FindStreamingLevel(GetLevel()))
         {
@@ -39,15 +73,38 @@ void AAngelIOExampleLift::BeginPlay()
             else
                 StartPositionInLevel = Stream->LevelTransform.InverseTransformPosition(GetActorLocation());
         }
+        PlacementZ = GetActorLocation().Z;
+        FString Error;
+        if (bPersistLanding && !LoadLanding(RestoredFloor, Error))
+        {
+            UE_LOG(LogTemp, Error, TEXT("%s cannot restore its landing: %s"), *GetPathName(), *Error);
+            TGuardValue<bool> DisableStartup(Mission->bStartOnBeginPlay, false);
+            Super::BeginPlay();
+            return;
+        }
     }
     Mission->OnSignal.AddDynamic(this, &AAngelIOExampleLift::HandleSignal);
     Mission->OnPublicStateChanged.AddDynamic(this, &AAngelIOExampleLift::CheckMotionState);
-    Super::BeginPlay();
-    if (!HasAuthority() || GetNetMode() == NM_Client) return;
+    if (RestoredFloor.IsSet())
+    {
+        // Seed the executor before it publishes its first replicated LastFloor.
+        const FString Input = TEXT("StartingFloor");
+        TOptional<FAngelIOValue> Authored;
+        if (const auto* Value = Mission->InitialInputs.Find(Input)) Authored = *Value;
+        FAngelIOValue FloorInput;
+        FloorInput.Integer = *RestoredFloor;
+        Mission->InitialInputs.Add(Input, FloorInput);
+        Super::BeginPlay();
+        if (Authored) Mission->InitialInputs.Add(Input, *Authored);
+        else Mission->InitialInputs.Remove(Input);
+    }
+    else Super::BeginPlay();
+    if (!bServer) return;
     FAngelIOValue Floor;
     if (Mission->GetOutput(TEXT("LastFloor"), Floor))
         OriginZ = GetActorLocation().Z - double(Floor.Integer) * 200.0;
-    if (bRequestOnStart) RequestFloor(RequestedFloor);
+    if (RestoredFloor.IsSet()) ForceNetUpdate();
+    else if (bRequestOnStart) RequestFloor(RequestedFloor);
 }
 
 bool AAngelIOExampleLift::RequestFloor(int32 Floor)
@@ -141,7 +198,7 @@ void AAngelIOExampleLift::HandleSignal(FString Name, int32 Value)
     StartZ = GetActorLocation().Z;
     ElapsedTravelTime = 0;
     if (AtDestination())
-        Mission->SendSignal(TEXT("MotionFinished"), DestinationFloor);
+        FinishMotion();
     else
         SetActorTickEnabled(true);
 }
@@ -150,6 +207,28 @@ bool AAngelIOExampleLift::AtDestination() const
 {
     // Unreal may coalesce a sub-millimetre transform update at the end of a trip.
     return FMath::IsNearlyEqual(GetActorLocation().Z, DestinationZ, 0.01);
+}
+
+void AAngelIOExampleLift::FinishMotion()
+{
+    // Commit only a physical arrival, before the VM publishes Arrived or wakes a caller.
+    if (bPersistLanding)
+    {
+        TArray<uint8> Bytes;
+        FMemoryWriter Writer(Bytes);
+        double OffsetZ = DestinationZ - PlacementZ;
+        Writer << DestinationFloor << OffsetZ;
+        FString Error;
+        if (!Mission->SaveComponentState(LandingKey, Bytes, Error))
+        {
+            UE_LOG(LogTemp, Error, TEXT("%s cannot commit its landing: %s"), *GetPathName(), *Error);
+            if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled, TEXT("LandingSaveFailed"));
+            ActiveTrip.Reset();
+            Mission->StopScript();
+            return;
+        }
+    }
+    Mission->SendSignal(TEXT("MotionFinished"), DestinationFloor);
 }
 
 void AAngelIOExampleLift::Tick(float DeltaSeconds)
@@ -162,6 +241,6 @@ void AAngelIOExampleLift::Tick(float DeltaSeconds)
     if (AtDestination())
     {
         SetActorTickEnabled(false);
-        Mission->SendSignal(TEXT("MotionFinished"), DestinationFloor);
+        FinishMotion();
     }
 }

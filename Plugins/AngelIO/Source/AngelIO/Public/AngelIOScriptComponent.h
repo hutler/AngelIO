@@ -81,6 +81,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category="AngelIO")
     FString GetWaitingSignal() const;
+    // Native gameplay state shares the mission slot and placed component identity. An empty load means no saved state.
+    bool LoadComponentState(const FString& Key, TArray<uint8>& Data, FString& Error) const;
+    bool SaveComponentState(const FString& Key, TConstArrayView<uint8> Data, FString& Error) const;
 #if WITH_EDITOR
     FAngelIOMissionInspection InspectMission() const;
 #endif

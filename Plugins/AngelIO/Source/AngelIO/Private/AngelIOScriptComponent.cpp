@@ -141,6 +141,25 @@ bool UAngelIOScriptComponent::SendSignal(const FString& Name, int32 Value)
     return true;
 }
 
+bool UAngelIOScriptComponent::LoadComponentState(const FString& Key, TArray<uint8>& Data, FString& Error) const
+{
+    Data.Reset();
+    if (CanRunMission() && GetOwner()->GetLevel())
+        if (auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())
+            return Store->LoadState(*this, Key, Data, Error);
+    Error = TEXT("Loading component state requires an authoritative game world");
+    return false;
+}
+
+bool UAngelIOScriptComponent::SaveComponentState(const FString& Key, TConstArrayView<uint8> Data, FString& Error) const
+{
+    if (CanRunMission() && GetOwner()->GetLevel())
+        if (auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())
+            return Store->SaveState(*this, Key, Data, Error);
+    Error = TEXT("Saving component state requires an authoritative game world");
+    return false;
+}
+
 FString UAngelIOScriptComponent::GetWaitingSignal() const
 {
     if (CanRunMission()) return Program ? Program->WaitingFor() : FString();
