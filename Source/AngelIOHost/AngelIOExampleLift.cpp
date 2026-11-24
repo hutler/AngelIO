@@ -57,6 +57,7 @@ bool AAngelIOExampleLift::LoadLanding(TOptional<int32>& Floor, FString& Error)
     Location.Z = PlacementZ + OffsetZ;
     SetActorLocation(Location, false, nullptr, ETeleportType::TeleportPhysics);
     Floor = LandedFloor;
+    Mission->ReportPersistedInteger(EAngelIOStateChange::Restored, LandingKey, Address->GetTargetName(), TEXT("floor"), LandedFloor);
     return true;
 }
 
@@ -227,6 +228,7 @@ void AAngelIOExampleLift::FinishMotion()
             Mission->StopScript();
             return;
         }
+        Mission->ReportPersistedInteger(EAngelIOStateChange::Saved, LandingKey, Address->GetTargetName(), TEXT("floor"), DestinationFloor);
     }
     Mission->SendSignal(TEXT("MotionFinished"), DestinationFloor);
 }

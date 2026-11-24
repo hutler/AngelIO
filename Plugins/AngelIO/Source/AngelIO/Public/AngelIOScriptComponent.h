@@ -7,6 +7,8 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FAngelIOSignal, FString, SignalName, int32, Value);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FAngelIOStateChanged);
 
+enum class EAngelIOStateChange { Saved, Restored };
+
 USTRUCT()
 struct FAngelIOPublicOutput
 {
@@ -84,6 +86,8 @@ public:
     // Native gameplay state shares the mission slot and placed component identity. An empty load means no saved state.
     bool LoadComponentState(const FString& Key, TArray<uint8>& Data, FString& Error) const;
     bool SaveComponentState(const FString& Key, TConstArrayView<uint8> Data, FString& Error) const;
+    // Report a display value after the native owner commits a record or applies a valid restore.
+    void ReportPersistedInteger(EAngelIOStateChange Change, const FString& Key, FName Target, const FString& Field, int32 Value);
 #if WITH_EDITOR
     FAngelIOMissionInspection InspectMission() const;
 #endif
@@ -114,6 +118,9 @@ private:
     TSharedPtr<FAngelIOProgram> Program;
     TArray<FAngelIOEvent> Pending;
     bool bDispatching = false;
+#if WITH_EDITOR
+    TMap<FGuid, FAngelIOInspectedInteger> PersistedIntegers;
+#endif
     void FlushEvents();
     void DispatchPendingEvents();
     void ReportErrors() const;

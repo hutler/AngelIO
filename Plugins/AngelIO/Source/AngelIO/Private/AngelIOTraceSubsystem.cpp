@@ -62,7 +62,7 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
     OutFile.Reset();
     if (Events.IsEmpty()) return false;
     auto Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("schemaVersion"), 2);
+    Root->SetNumberField(TEXT("schemaVersion"), 3);
     Root->SetStringField(TEXT("sessionId"), SessionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Root->SetStringField(TEXT("world"), GetWorld()->GetName());
     Root->SetStringField(TEXT("netMode"), NetMode);

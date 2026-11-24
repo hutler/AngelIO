@@ -1,6 +1,8 @@
 #include "AngelIOScriptComponent.h"
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOTargetRegistry.h"
+#include "AngelIOTraceSubsystem.h"
+#include "Dom/JsonObject.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Net/UnrealNetwork.h"
@@ -43,6 +45,9 @@ void UAngelIOScriptComponent::EndPlay(const EEndPlayReason::Type Reason)
     Pending.Reset();
     ReleaseProgram();
     PublicState = {};
+#if WITH_EDITOR
+    PersistedIntegers.Reset();
+#endif
     Super::EndPlay(Reason);
 }
 
@@ -160,6 +165,28 @@ bool UAngelIOScriptComponent::SaveComponentState(const FString& Key, TConstArray
     return false;
 }
 
+void UAngelIOScriptComponent::ReportPersistedInteger(EAngelIOStateChange Change, const FString& Key, FName Target,
+    const FString& Field, int32 Value)
+{
+    if (!CanRunMission()) return;
+    auto* Trace = GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>();
+    if (!Trace) return;
+    const FGuid Id = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>()->StateId(*this, Key);
+    const bool bRestored = Change == EAngelIOStateChange::Restored;
+    auto Event = Trace->Append({}, bRestored ? TEXT("stateRestored") : TEXT("stateSaved"), this);
+    Event->SetStringField(TEXT("stateId"), Id.ToString(EGuidFormats::DigitsWithHyphensLower));
+    Event->SetStringField(TEXT("target"), Target.IsNone() ? GetOwner()->GetName() : Target.ToString());
+    Event->SetStringField(TEXT("component"), GetPathName());
+    Event->SetStringField(TEXT("field"), Field);
+    Event->SetNumberField(TEXT("value"), Value);
+#if WITH_EDITOR
+    auto& Info = PersistedIntegers.FindOrAdd(Id);
+    Info.Field = Field;
+    Info.Saved = Value;
+    if (bRestored) Info.Restored = Value;
+#endif
+}
+
 FString UAngelIOScriptComponent::GetWaitingSignal() const
 {
     if (CanRunMission()) return Program ? Program->WaitingFor() : FString();
@@ -178,6 +205,7 @@ void UAngelIOScriptComponent::FlushEvents()
 FAngelIOMissionInspection UAngelIOScriptComponent::InspectMission() const
 {
     auto Info = Program ? Program->InspectMission() : FAngelIOMissionInspection{};
+    Info.PersistedIntegers = PersistedIntegers;
     if (Info.Script.IsEmpty()) Info.Script = Script;
     if (CanRunMission() && GetOwner()->GetLevel())
         if (auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())

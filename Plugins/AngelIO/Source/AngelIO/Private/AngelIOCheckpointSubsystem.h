@@ -26,8 +26,10 @@ public:
     bool Save(const UActorComponent& Component, const FString& Script, FCheckpoint& Record, FString& Error);
     bool LoadState(const UActorComponent& Component, const FString& Key, TArray<uint8>& Data, FString& Error);
     bool SaveState(const UActorComponent& Component, const FString& Key, TConstArrayView<uint8> Data, FString& Error);
+    FGuid StateId(const UActorComponent& Component, const FString& Key) const;
 
 private:
     bool Open(FString& Error, bool bInspectOnly);
     FSQLiteDatabase Database;
+    FString TraceSlot;
 };

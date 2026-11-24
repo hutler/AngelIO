@@ -4,6 +4,7 @@
 #include "AngelIOTraceSubsystem.generated.h"
 
 class FJsonObject;
+class UAngelIOScriptComponent;
 
 // One bounded mission history per authoritative game world.
 UCLASS()
@@ -25,6 +26,7 @@ public:
 
 private:
     friend class FAngelIOOperation;
+    friend class UAngelIOScriptComponent;
     TSharedRef<FJsonObject> Append(const FGuid& OperationId, const TCHAR* EventType, const UObject* Target);
     static constexpr int32 Capacity = 4096;
     struct FEntry

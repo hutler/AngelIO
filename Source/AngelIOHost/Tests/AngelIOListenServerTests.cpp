@@ -420,6 +420,13 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
         TestTrue(TEXT("Reloaded lift arrives at the physical sixth floor"), FindLift(Host, 2)->GetActorLocation().Equals(FloorSix, 0.1));
         if (!FindLift(FindPeer(NM_Client), 2)->GetActorLocation().Equals(FloorSix, 1)) return false;
         TestTrue(TEXT("Persistent caller finishes its new ride"), Room->Output(TEXT("Arrived")));
+        const auto State = FindLift(Host, 2)->Mission->InspectMission().PersistedIntegers;
+        if (TestEqual(TEXT("One persisted freight floor"), State.Num(), 1))
+        {
+            const auto& Floor = State.CreateConstIterator().Value();
+            TestEqual(TEXT("New arrival updates the saved floor"), Floor.Saved, 6);
+            TestTrue(TEXT("Original restore stays at floor two"), Floor.Restored.IsSet() && *Floor.Restored == 2);
+        }
         int32 Unloaded = 0, Gone = 0;
         Host->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
         {
@@ -542,7 +549,8 @@ bool FAngelIOWaitActorListen::RunTest(const FString&)
         S->Remote->GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
         {
             const auto Type = Event.GetStringField(TEXT("type"));
-            const auto Id = Event.GetStringField(TEXT("operationId"));
+            FString Id;
+            if (!Event.TryGetStringField(TEXT("operationId"), Id)) return;
             if (Type == TEXT("call"))
             {
                 const auto Caller = Event.GetObjectField(TEXT("caller"));
@@ -852,6 +860,36 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
         }
         return true;
     };
+    const auto Inspector = SNew(SAngelIOMissionInspector);
+    auto CheckLanding = [this, Inspector](bool bRestored)
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        const auto* Freight = FindLift(Host, 2);
+        FString Id;
+        for (UWorld* World : {Host, FindPeer(NM_Client)})
+        {
+            Inspector->SelectWorld(World);
+            Inspector->SelectMission(FindLift(World, 2)->Mission);
+            if (!TestTrue(TEXT("Selected freight mission resolves to the server"), Inspector->AuthorityMission.Get() == Freight->Mission) ||
+                !TestEqual(TEXT("One landing record for the selected lift"), Inspector->Inspection.PersistedIntegers.Num(), 1)) return;
+            Id = Inspector->Inspection.PersistedIntegers.CreateConstIterator().Key().ToString(EGuidFormats::DigitsWithHyphensLower);
+            TestEqual(TEXT("Inspector shows committed and restored floors"), Inspector->PersistedStateSummary(),
+                FString::Printf(TEXT("Saved floor: 4\nRestored floor: %s\nState ID: %s"), bRestored ? TEXT("4") : TEXT("None this activation"), *Id));
+            Inspector->SelectMission(FindLift(World, 3)->Address);
+            TestTrue(TEXT("Selecting the delivery panel clears the lift state"), Inspector->PersistedStateSummary().IsEmpty());
+        }
+        TArray<FString> Changes;
+        Host->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject* Subject)
+        {
+            FString StateId;
+            if (!Event.TryGetStringField(TEXT("stateId"), StateId) || StateId != Id) return;
+            TestTrue(TEXT("Landing belongs to the freight executor"), Subject == Freight->Mission &&
+                Event.GetStringField(TEXT("target")) == TEXT("FreightLift") && Event.GetStringField(TEXT("field")) == TEXT("floor"));
+            Changes.Add(FString::Printf(TEXT("%s %d"), *Event.GetStringField(TEXT("type")), Event.GetIntegerField(TEXT("value"))));
+        });
+        TestEqual(TEXT("Only committed landings and applied restores enter the journal"), FString::Join(Changes, TEXT(", ")),
+            FString(bRestored ? TEXT("stateRestored 4") : TEXT("stateSaved 2, stateSaved 4")));
+    };
     auto CheckHistory = [this](int32 ExpectedTrips, const TCHAR* ExpectedEvent)
     {
         const auto* Trace = FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>();
@@ -879,7 +917,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             TestTrue(TEXT("Dispatch accepted"), DeliveryPanel(Session->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
             return true;
         });
-        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory, BothAtFloorFour]
+        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory, CheckLanding, BothAtFloorFour]
         {
             auto* Client = DeliveryPanel(Session->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1) ||
@@ -887,6 +925,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             Session->CheckpointId = DeliveryPanel(Session->Host.Get())->InspectMission().CheckpointId;
             TestTrue(TEXT("Slot exists before teardown"), FPaths::FileExists(File) && Session->CheckpointId.IsValid());
             CheckHistory(1, TEXT("checkpointSaved"));
+            CheckLanding(false);
             return true;
         });
         EndListenSession();
@@ -905,7 +944,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             TestTrue(TEXT("Recreated mission can finish"), Panel->SendSignal(TEXT("Confirm"), 0));
             return true;
         });
-        Steps(TEXT("both peers see the restored fourth-floor cab without a startup or delivery ride"), [this, Session, CheckHistory, BothAtFloorFour]
+        Steps(TEXT("both peers see the restored fourth-floor cab without a startup or delivery ride"), [this, Session, CheckHistory, CheckLanding, BothAtFloorFour]
         {
             if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !BothAtFloorFour(0) ||
                 !AtFloor(FindPeer(NM_Client), 3, 3, 0)) return false;
@@ -913,6 +952,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
                 *FindLift(FindPeer(NM_ListenServer), 2)->GetActorLocation().ToString(),
                 *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
             CheckHistory(0, TEXT("checkpointRestored"));
+            CheckLanding(true);
             return true;
         });
         EndListenSession();
@@ -1044,9 +1084,10 @@ bool FAngelIOTypedListen::RunTest(const FString&)
         for (const auto& Value : Trace->GetArrayField(TEXT("events")))
         {
             const auto Event = Value->AsObject();
-            const FString Id = Event->GetStringField(TEXT("operationId"));
             const FString Type = Event->GetStringField(TEXT("type"));
             TestEqual(TEXT("Ordered sequence"), Event->GetIntegerField(TEXT("sequence")), ++ExpectedSequence);
+            FString Id;
+            if (!Event->TryGetStringField(TEXT("operationId"), Id)) continue;
             Timeline.FindOrAdd(Id) += Type + TEXT(" ");
             if (Type == TEXT("call"))
             {

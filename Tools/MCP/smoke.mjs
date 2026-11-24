@@ -9,7 +9,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const { values } = parseArgs({ options: {
   project: { type: "string" }, editor: { type: "string" }, trace: { type: "string" },
-  "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" }
+  "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" },
+  "landing-write-trace": { type: "string" }, "landing-read-trace": { type: "string" }
 } });
 const root = path.join(path.dirname(path.resolve(values.project)), "Content", "AngelIO");
 const client = new Client({ name: "angelio-smoke", version: "1" });
@@ -88,7 +89,7 @@ try {
       return reply.structuredContent;
     };
     const history = await read({ limit: 200 });
-    assert.equal(history.schemaVersion, 2);
+    assert([2, 3].includes(history.schemaVersion));
     assert.equal(history.netMode, "listenServer");
     const checkpointId = history.events.find(e => e.type === "checkpointSaved").checkpointId;
     const first = await read({ checkpointId, limit: 2 });
@@ -117,6 +118,38 @@ try {
     const tripHistory = await read({ operationId: ride.operationId });
     assert(tripHistory.events.length && tripHistory.events.every(e => e.operationId === ride.operationId && !e.checkpointId));
     console.log("read_trace verified checkpoint saves and restores across room reloads in " + trace);
+  }
+  if (values["landing-write-trace"] || values["landing-read-trace"]) {
+    const writer = values["landing-write-trace"], reader = values["landing-read-trace"];
+    assert(writer && reader, "Pass the exports from both halves of CheckpointRestart");
+    const read = async (trace, args = {}) => {
+      const response = await call("read_trace", { trace, ...args });
+      assert(!response.isError, JSON.stringify(response.content));
+      return response.structuredContent;
+    };
+    const before = await read(writer);
+    const after = await read(reader);
+    for (const history of [before, after]) {
+      assert.equal(history.schemaVersion, 3);
+      assert.equal(history.netMode, "listenServer");
+      assert.equal(history.droppedEvents, 0);
+    }
+    assert.notEqual(before.sessionId, after.sessionId);
+    const freight = before.events.find(e => e.type === "stateSaved" && e.target === "FreightLift");
+    assert(freight);
+    const stateId = freight.stateId;
+    const first = await read(writer, { stateId, limit: 1 });
+    assert.equal(first.nextAfterSequence, first.events[0].sequence);
+    const second = await read(writer, { stateId, afterSequence: first.nextAfterSequence });
+    const restored = await read(reader, { stateId });
+    const events = [...first.events, ...second.events, ...restored.events];
+    assert.deepEqual(events.map(e => [e.type, e.value]), [["stateSaved", 2], ["stateSaved", 4], ["stateRestored", 4]]);
+    assert(events.every(e => e.stateId === stateId && e.target === "FreightLift" && e.field === "floor" && e.component));
+    assert.equal(restored.nextAfterSequence, null);
+    assert(after.events.some(e => e.type === "stateRestored" && e.value === 3 && e.stateId !== stateId));
+    assert(!after.events.some(e => e.operation === "Lift.MoveTo"));
+    assert((await call("read_trace", { trace: reader, stateId, operationId: stateId })).isError);
+    console.log("read_trace verified the saved and restored floor across listen-server processes: " + stateId);
   }
   assert((await call("list_scripts")).structuredContent.scripts.includes("Elevator.as"));
   const api = (await call("describe_api")).structuredContent;

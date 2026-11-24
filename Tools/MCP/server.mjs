@@ -72,22 +72,28 @@ const checkpointEvent = z.object({
   caller: z.object({ instanceId: guid, script: z.string(), line: z.number().int(), component: z.string() }).passthrough()
 }).passthrough();
 const traceFields = { sessionId: guid, world: z.string(), netMode: z.string(), droppedEvents: z.number().int().nonnegative() };
+const stateEvent = z.object({
+  ...eventFields, type: z.enum(["stateSaved", "stateRestored"]), stateId: guid,
+  target: z.string(), component: z.string(), field: z.string(), value: z.number().int()
+});
 const traceSchema = z.discriminatedUnion("schemaVersion", [
   z.object({ ...traceFields, schemaVersion: z.literal(1), events: z.array(operationEvent) }),
-  z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) })
+  z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) }),
+  z.object({ ...traceFields, schemaVersion: z.literal(3), events: z.array(z.union([operationEvent, checkpointEvent, stateEvent])) })
 ]);
 
 server.registerTool("read_trace", {
-  description: "Read exported mission events from Saved/AngelIO/Traces. Follow a ride by operationId or follow saved and restored stages across room reloads by checkpointId. Omit both to browse the history. Reuse the returned trace filename when paging.",
+  description: "Read exported mission events from Saved/AngelIO/Traces. Filter rides by operationId, mission stages by checkpointId, or saved and restored lift floors by stateId. Each server session has its own export. Reuse the trace filename when paging.",
   inputSchema: {
     trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
     operationId: guid.optional(),
     checkpointId: guid.optional().describe("Checkpoint ID from the mission inspector or a checkpoint event."),
+    stateId: guid.optional().describe("State ID from the inspector or a stateSaved/stateRestored event. Use the same ID in both server exports."),
     afterSequence: z.number().int().nonnegative().default(0),
     limit: z.number().int().min(1).max(200).default(50)
   }, annotations
-}, async ({ trace, operationId, checkpointId, afterSequence, limit }) => {
-  if (operationId && checkpointId) throw new Error("Choose either operationId or checkpointId.");
+}, async ({ trace, operationId, checkpointId, stateId, afterSequence, limit }) => {
+  if ([operationId, checkpointId, stateId].filter(Boolean).length > 1) throw new Error("Choose one of operationId, checkpointId or stateId.");
   const directory = path.join(path.dirname(project), "Saved", "AngelIO", "Traces");
   const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with mission events.";
   let entries;
@@ -102,8 +108,10 @@ server.registerTool("read_trace", {
   const { events, ...metadata } = traceSchema.parse(JSON.parse(await readFile(target, "utf8")));
   const operation = operationId?.toLowerCase();
   const checkpoint = checkpointId?.toLowerCase();
+  const state = stateId?.toLowerCase();
   const matches = events.filter(event => event.sequence > afterSequence &&
-    (!operation || event.operationId === operation) && (!checkpoint || event.checkpointId === checkpoint));
+    (!operation || event.operationId === operation) && (!checkpoint || event.checkpointId === checkpoint) &&
+    (!state || event.stateId === state));
   const page = matches.slice(0, limit);
   return result({ trace: filename, ...metadata, events: page,
     nextAfterSequence: matches.length > limit ? page.at(-1).sequence : null });

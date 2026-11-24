@@ -17,6 +17,7 @@
 #include "Styling/AppStyle.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SBoxPanel.h"
@@ -213,6 +214,12 @@ void SAngelIOMissionInspector::Construct(const FArguments&)
                 + SVerticalBox::Slot().AutoHeight()
                 [ SNew(SEditableTextBox).IsReadOnly(true).ToolTipText(FText::FromString(TEXT("Checkpoint ID for read_trace")))
                     .Text_Lambda([this]{return FText::FromString(Inspection.CheckpointId.ToString(EGuidFormats::DigitsWithHyphensLower));}) ] ]
+            + SVerticalBox::Slot().AutoHeight()
+            [ SNew(SVerticalBox).Visibility_Lambda([this]{return Inspection.PersistedIntegers.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;})
+                + SVerticalBox::Slot().AutoHeight().Padding(0,10,0,3)[Heading(TEXT("Persisted component state"))]
+                + SVerticalBox::Slot().AutoHeight()
+                [ SNew(SMultiLineEditableTextBox).IsReadOnly(true).AutoWrapText(true)
+                    .Text_Lambda([this]{return FText::FromString(PersistedStateSummary());}) ] ]
             + SVerticalBox::Slot().AutoHeight().Padding(0,14,0,3)[Heading(TEXT("Operation history"))]
             + SVerticalBox::Slot().AutoHeight()
             [ SNew(SComboButton).IsEnabled_Lambda([this]{return !Operations.IsEmpty();}).OnGetMenuContent(this, &SAngelIOMissionInspector::OperationMenu)
@@ -382,6 +389,19 @@ FString SAngelIOMissionInspector::CheckpointSummary() const
     else
         Text += TEXT("\nNo checkpoint restored this run");
     return Text;
+}
+
+FString SAngelIOMissionInspector::PersistedStateSummary() const
+{
+    TArray<FString> Rows;
+    for (const auto& Pair : Inspection.PersistedIntegers)
+    {
+        const auto& State = Pair.Value;
+        const FString Restore = State.Restored.IsSet() ? FString::FromInt(*State.Restored) : TEXT("None this activation");
+        Rows.Add(FString::Printf(TEXT("Saved %s: %d\nRestored %s: %s\nState ID: %s"), *State.Field, State.Saved,
+            *State.Field, *Restore, *Pair.Key.ToString(EGuidFormats::DigitsWithHyphensLower)));
+    }
+    return FString::Join(Rows, TEXT("\n\n"));
 }
 
 void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority)

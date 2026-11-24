@@ -62,6 +62,13 @@ struct FAngelIOLiteralTarget
     int32 Line;
 };
 
+struct FAngelIOInspectedInteger
+{
+    FString Field;
+    int32 Saved = 0;
+    TOptional<int32> Restored;
+};
+
 struct FAngelIOMissionInspection
 {
     EAngelIOState State = EAngelIOState::Empty;
@@ -73,6 +80,7 @@ struct FAngelIOMissionInspection
     FGuid CheckpointId;
     FString SavedStage, RestoredStage;
     int32 SavedVersion = 0, RestoredVersion = 0;
+    TMap<FGuid, FAngelIOInspectedInteger> PersistedIntegers;
 };
 #endif
 

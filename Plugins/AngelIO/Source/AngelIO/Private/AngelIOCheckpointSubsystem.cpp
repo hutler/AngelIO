@@ -10,7 +10,9 @@
 
 namespace
 {
-    bool BindComponentKey(FSQLitePreparedStatement& Statement, const UActorComponent& Component, const FString& Key)
+    struct FComponentAddress { FString Map, Owner; };
+
+    FComponentAddress ComponentAddress(const UActorComponent& Component)
     {
         const ULevel* Level = Component.GetOwner()->GetLevel();
         const UWorld* World = Component.GetWorld();
@@ -22,9 +24,14 @@ namespace
         };
         const FString Room = Package(Stream ? Stream->GetWorldAssetPackageName() : Level->GetOutermost()->GetName());
         const FString Owner = Room + TEXT(":") + Component.GetPathName(Level);
-        return Statement.IsValid() &&
-            Statement.SetBindingValueByIndex(1, Package(World->GetOutermost()->GetName()).ToLower()) &&
-            Statement.SetBindingValueByIndex(2, Owner.ToLower()) && Statement.SetBindingValueByIndex(3, Key.ToLower());
+        return {Package(World->GetOutermost()->GetName()).ToLower(), Owner.ToLower()};
+    }
+
+    bool BindComponentKey(FSQLitePreparedStatement& Statement, const UActorComponent& Component, const FString& Key)
+    {
+        const auto Address = ComponentAddress(Component);
+        return Statement.IsValid() && Statement.SetBindingValueByIndex(1, Address.Map) &&
+            Statement.SetBindingValueByIndex(2, Address.Owner) && Statement.SetBindingValueByIndex(3, Key.ToLower());
     }
 
     bool BindMission(FSQLitePreparedStatement& Statement, const UActorComponent& Component, FString Script)
@@ -68,7 +75,15 @@ bool UAngelIOCheckpointSubsystem::Open(FString& Error, bool bInspectOnly)
         Database.Close();
         return false;
     }
+    TraceSlot = Slot.IsEmpty() ? TEXT(":memory:") + FGuid::NewGuid().ToString() : Slot.ToLower();
     return true;
+}
+
+FGuid UAngelIOCheckpointSubsystem::StateId(const UActorComponent& Component, const FString& Key) const
+{
+    const auto Address = ComponentAddress(Component);
+    const TCHAR* Domain = GetWorld()->WorldType == EWorldType::PIE ? TEXT("PIE") : TEXT("Game");
+    return FGuid::NewDeterministicGuid(FString::Join(TArray<FString>{Domain, TraceSlot, Address.Map, Address.Owner, Key.ToLower()}, TEXT("|")));
 }
 
 bool UAngelIOCheckpointSubsystem::Load(const UActorComponent& Component, const FString& Script,
