@@ -27,6 +27,7 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="Demo")
     bool RequestFloor(int32 Floor);
+    bool IsReadyForTrip() const;
     TSharedRef<FLiftTrip> MoveTo(int32 Floor, float TravelSpeed, FName Target = NAME_None);
     uint64 GetPlayGeneration() const { return PlayGeneration; }
 

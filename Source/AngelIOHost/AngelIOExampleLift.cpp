@@ -55,6 +55,11 @@ bool AAngelIOExampleLift::RequestFloor(int32 Floor)
     return Mission->SendSignal(TEXT("RequestFloor"), Floor);
 }
 
+bool AAngelIOExampleLift::IsReadyForTrip() const
+{
+    return HasActorBegunPlay() && !ActiveTrip && Mission->GetWaitingSignal() == TEXT("RequestFloor");
+}
+
 TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed, FName Target)
 {
     if (Target.IsNone()) Target = Address->GetTargetName();

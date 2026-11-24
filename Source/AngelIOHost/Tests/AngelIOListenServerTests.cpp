@@ -98,6 +98,14 @@ bool TripOutput(UAngelIOScriptComponent* Panel, const TCHAR* Name, int32 Expecte
     FAngelIOValue Value;
     return Panel && Panel->GetOutput(Name, Value) && Value.Integer == Expected;
 }
+
+ULevelStreamingDynamic* LoadLiftRoom(UWorld* World)
+{
+    bool bSuccess = false;
+    auto* Stream = ULevelStreamingDynamic::LoadLevelInstance(World, TEXT("/Game/Demo/TwoLifts"),
+        FVector(1200, -1600, 300), FRotator::ZeroRotator, bSuccess, TEXT("AngelIOStreamedRoom"));
+    return bSuccess ? Stream : nullptr;
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOListen, "AngelIO.Network.ListenServer.NamedGroupAndLateJoin",
@@ -320,14 +328,8 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
             })");
         if (!TestTrue(TEXT("Lookup is empty before loading"), Room->Caller.Compile(TEXT("StreamedLift.as"), Source) &&
             Room->Caller.Start({}, Host) && Room->Output(TEXT("Absent")))) return true;
-        auto Load = [](UWorld* World)
-        {
-            bool bSuccess = false;
-            return ULevelStreamingDynamic::LoadLevelInstance(World, TEXT("/Game/Demo/TwoLifts"),
-                FVector(1200, -1600, 300), FRotator::ZeroRotator, bSuccess, TEXT("AngelIOStreamedRoom"));
-        };
-        Room->Host = Load(Host);
-        Room->Client = Load(Client);
+        Room->Host = LoadLiftRoom(Host);
+        Room->Client = LoadLiftRoom(Client);
         TestTrue(TEXT("Dynamic room requested on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
         return true;
     });
@@ -406,6 +408,147 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
         });
         TestEqual(TEXT("One interrupted ride"), Unloaded, 1);
         TestEqual(TEXT("Each stale call has its own TargetGone result"), Gone, 3);
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOWaitActorListen, "AngelIO.Network.ListenServer.WaitActor",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOWaitActorListen::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession(TEXT("/Engine/Maps/Entry"));
+    struct FScenario
+    {
+        TWeakObjectPtr<AAngelIOPlayerController> Remote, Client;
+        TWeakObjectPtr<ULevelStreamingDynamic> ServerRoom, ClientRoom;
+        bool SetTimeout(float Seconds) const
+        {
+            FAngelIOValue Value;
+            Value.Type = EAngelIOType::Float;
+            Value.Float = Seconds;
+            return Remote->TripPanel->SetInput(TEXT("TimeoutSeconds"), Value);
+        }
+    };
+    const auto S = MakeShared<FScenario>();
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("connected client requests a lift before its room exists"), [this, S]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client) return false;
+        S->Client = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        for (auto It = Host->GetPlayerControllerIterator(); It; ++It)
+            if (auto* PC = Cast<AAngelIOPlayerController>(It->Get()); PC && !PC->IsLocalController()) S->Remote = PC;
+        if (!S->Remote.IsValid() || !S->Client.IsValid() || !S->Client->GetNetConnection()) return false;
+        S->Remote->TripPanel->Script = TEXT("Examples/StreamedLift.as");
+        if (!TestTrue(TEXT("Start streamed lift mission"), S->Remote->TripPanel->StartScript() && S->SetTimeout(0.15f))) return true;
+        S->Client->LiftTrip(4, 800);
+        FAngelIOProgram Stopped;
+        TestTrue(TEXT("Unbounded wait suspends until its caller stops"), Stopped.Compile(TEXT("Stopped.as"),
+            TEXT("void Run() { Lift@ lift = WaitActor(\"NeverLoaded\"); }")) && Stopped.Start({}, Host) && Stopped.IsWaitingOnOperation());
+        return true;
+    });
+    Steps(TEXT("timeout returns null to the script and replicates its output"), [this, S]
+    {
+        if (!TripOutput(S->Client->TripPanel, TEXT("Completed"), 1)) return false;
+        TestTrue(TEXT("Script handled a timed-out lookup"), TripOutput(S->Client->TripPanel, TEXT("LastStatus"), 3));
+        TestTrue(TEXT("Set a longer deadline"), S->SetTimeout(10.f));
+        S->Client->LiftTrip(6, 800);
+        return true;
+    });
+    Steps(TEXT("load the room while the panel is waiting by name"), [this, S]
+    {
+        if (S->Client->TripPanel->GetWaitingSignal() != TEXT("WaitActor")) return false;
+        const auto Site = S->Remote->TripPanel->InspectMission();
+        TestTrue(TEXT("Inspector identifies the waiting mission and operation"),
+            Site.Script == TEXT("Examples/StreamedLift.as") && Site.Line > 0 && Site.Operation.IsValid());
+        S->ServerRoom = LoadLiftRoom(S->Remote->GetWorld());
+        S->ClientRoom = LoadLiftRoom(S->Client->GetWorld());
+        TestTrue(TEXT("Room loads on both peers"), S->ServerRoom.IsValid() && S->ClientRoom.IsValid());
+        return true;
+    });
+    Steps(TEXT("WaitActor waits through the startup ride, then MoveTo reaches floor six"), [this, S]
+    {
+        if (!AtFloor(S->Client->GetWorld(), 2, 6, 2) || !TripOutput(S->Client->TripPanel, TEXT("Completed"), 2)) return false;
+        TestTrue(TEXT("Client observes successful first ride"), TripOutput(S->Client->TripPanel, TEXT("LastFloor"), 6) &&
+            TripOutput(S->Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Arrived)));
+        FAngelIOProgram Probe;
+        FAngelIOValue Ok;
+        TestTrue(TEXT("Ready is inline, ambiguous and missing zero-time polls return null"), Probe.Compile(TEXT("PollActor.as"),
+            TEXT("bool out_Ok; void Run() { out_Ok = WaitActor(\"FREIGHTLIFT\") !is null && ")
+            TEXT("WaitActor(\"FreightLift\", 0) !is null && WaitActor(\"DemoLifts\", 0) is null && ")
+            TEXT("WaitActor(\"Missing\", 0) is null; }")) && Probe.Start({}, S->Remote->GetWorld()) &&
+            Probe.State() == EAngelIOState::Finished && Probe.GetOutput(TEXT("Ok"), Ok) && Ok.Boolean);
+        FAngelIOProgram Invalid;
+        TestTrue(TEXT("Invalid timeout fails even for an already-ready actor"), Invalid.Compile(TEXT("InvalidWaitActor.as"),
+            TEXT("void Run() { WaitActor(\"FreightLift\", -1); }")) && !Invalid.Start({}, S->Remote->GetWorld()) &&
+            Invalid.Diagnostics().ContainsByPredicate([](const auto& D) { return D.Message.Contains(TEXT("non-negative")); }));
+        for (auto Level : {S->ServerRoom, S->ClientRoom})
+        {
+            Level->SetShouldBeVisible(false);
+            Level->SetShouldBeLoaded(false);
+        }
+        return true;
+    });
+    Steps(TEXT("request a new ride while the room is fully unloaded"), [S]
+    {
+        if (S->ServerRoom->GetLoadedLevel() || S->ClientRoom->GetLoadedLevel()) return false;
+        S->Client->LiftTrip(4, 800);
+        return true;
+    });
+    Steps(TEXT("reload while waiting without sending a room-ready signal"), [S]
+    {
+        if (S->Client->TripPanel->GetWaitingSignal() != TEXT("WaitActor")) return false;
+        for (auto Level : {S->ServerRoom, S->ClientRoom})
+        {
+            Level->SetShouldBeLoaded(true);
+            Level->SetShouldBeVisible(true);
+        }
+        return true;
+    });
+    Steps(TEXT("client sees floor four and the trace explains all three waits"), [this, S]
+    {
+        if (!TripOutput(S->Client->TripPanel, TEXT("Completed"), 3) || !AtFloor(S->Client->GetWorld(), 2, 4, 2)) return false;
+        TestTrue(TEXT("Reloaded actor completed the new ride"), TripOutput(S->Client->TripPanel, TEXT("LastFloor"), 4) &&
+            TripOutput(S->Client->TripPanel, TEXT("LastStatus"), int32(ELiftTripStatus::Arrived)));
+        TSet<FString> Requests;
+        int32 Ready = 0, TimedOut = 0, Rides = 0, Detached = 0;
+        S->Remote->GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
+        {
+            const auto Type = Event.GetStringField(TEXT("type"));
+            const auto Id = Event.GetStringField(TEXT("operationId"));
+            if (Type == TEXT("call"))
+            {
+                const auto Caller = Event.GetObjectField(TEXT("caller"));
+                FString Script;
+                if (!Caller->TryGetStringField(TEXT("script"), Script) || Script != TEXT("Examples/StreamedLift.as")) return;
+                if (Event.GetStringField(TEXT("operation")) == TEXT("WaitActor"))
+                {
+                    Requests.Add(Id);
+                    TestTrue(TEXT("Lookup trace points to the remote mission"),
+                        Caller->GetStringField(TEXT("controller")) == TEXT("remote") && Caller->GetIntegerField(TEXT("line")) > 0);
+                }
+                else if (Event.GetStringField(TEXT("operation")) == TEXT("Lift.MoveTo")) ++Rides;
+            }
+            else if (Type == TEXT("complete"))
+            {
+                FString Reason;
+                if (Event.TryGetStringField(TEXT("reason"), Reason) && Reason == TEXT("WaiterDetached")) ++Detached;
+                if (!Requests.Contains(Id)) return;
+                const auto Status = Event.GetStringField(TEXT("status"));
+                if (Status == TEXT("Ready")) ++Ready;
+                if (Status == TEXT("TimedOut")) ++TimedOut;
+            }
+        });
+        TestEqual(TEXT("Distinct lookups"), Requests.Num(), 3);
+        TestEqual(TEXT("Two ready lookups"), Ready, 2);
+        TestEqual(TEXT("One lookup timed out"), TimedOut, 1);
+        TestEqual(TEXT("Only ready lookups called MoveTo"), Rides, 2);
+        TestEqual(TEXT("Stopped unbounded wait cleaned up"), Detached, 1);
         return true;
     });
     EndListenSession();

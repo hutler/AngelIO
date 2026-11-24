@@ -21,6 +21,12 @@ struct FAngelIOMapLookup
 
 enum class EAngelIOWaitOutcome : uint8 { Pending, Completed, TimedOut, Detached };
 
+struct FAngelIOScriptWrapper
+{
+    FString Declaration;
+    FString Body;
+};
+
 namespace AngelIO
 {
     ANGELIO_API UWorld* GetScriptWorld();
@@ -29,6 +35,10 @@ namespace AngelIO
     // One outcome per reader. An empty timeout waits indefinitely; zero polls.
     ANGELIO_API TSharedRef<const EAngelIOWaitOutcome> AwaitOperation(TSharedRef<FAngelIOOperation> Operation,
         const FString& Label, TOptional<double> TimeoutSeconds);
+    // Supply a side-effect-free game-thread predicate and capture world objects weakly.
+    // Checks immediately and on each update of this waiting VM until ready or expired.
+    ANGELIO_API void AwaitCondition(const FString& Label, const FString& Target, TOptional<double> TimeoutSeconds,
+        TFunction<bool()> IsReady);
 }
 
 // Register in StartupModule before any mission is compiled. Bindings must remain
@@ -38,6 +48,8 @@ class ANGELIO_API IAngelIOScriptAPI : public IModularFeature
 public:
     static FName FeatureName() { return TEXT("AngelIOScriptAPI"); }
     virtual bool RegisterBindings(asIScriptEngine& Engine) = 0;
+    // A wrapper can return a typed value after a suspending native call resumes.
+    virtual void GetScriptWrappers(TArray<FAngelIOScriptWrapper>& Out) const {}
 #if WITH_EDITOR
     virtual void GetMapLookups(TArray<FAngelIOMapLookup>& Out) const {}
 #endif

@@ -85,6 +85,10 @@ try {
   assert(api.externalDeclarations.some(s => s.includes("Lift::MoveTo(int floor, float speed)")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait()")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait(float")));
+  assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name)"));
+  assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name, float timeoutSeconds)"));
+  assert(!api.externalDeclarations.some(s => s.includes("AngelIOInternal::")));
+  assert((await call("validate_script", { script: "Examples/StreamedLift.as" })).structuredContent.valid);
   const mapReport = (await call("validate_map", { map: "/Game/Demo/TwoLifts" })).structuredContent;
   assert(mapReport.valid && mapReport.missionsChecked === 4, JSON.stringify(mapReport));
   const missing = (await call("validate_map", { map: "/Game/Demo/NoSuchAngelIOMap" })).structuredContent;

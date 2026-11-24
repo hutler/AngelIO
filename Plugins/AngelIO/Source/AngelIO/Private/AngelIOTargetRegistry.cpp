@@ -1,6 +1,7 @@
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOScriptComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/Actor.h"
 
 TArray<UAngelIOScriptComponent*> UAngelIOTargetRegistry::FindTargets(FName TargetName) const
 {
@@ -9,6 +10,23 @@ TArray<UAngelIOScriptComponent*> UAngelIOTargetRegistry::FindTargets(FName Targe
         for (const auto& Member : *Members)
             if (auto* Target = Member.Get()) Targets.Add(Target);
     return Targets;
+}
+
+AActor* UAngelIOTargetRegistry::FindUniqueActor(FName TargetName, UClass* ActorClass) const
+{
+    AActor* Match = nullptr;
+    if (const auto* Members = Groups.Find(TargetName))
+    {
+        for (const auto& Member : *Members)
+        {
+            const auto* Endpoint = Member.Get();
+            auto* Owner = Endpoint ? Endpoint->GetOwner() : nullptr;
+            if (!IsValid(Owner) || (ActorClass && !Owner->IsA(ActorClass))) continue;
+            if (Match && Match != Owner) return nullptr;
+            Match = Owner;
+        }
+    }
+    return Match;
 }
 
 void UAngelIOTargetRegistry::Register(FName Name, UAngelIOScriptComponent* Target)

@@ -69,7 +69,11 @@ Rebuild the editor after changing a binding. Check the new signature in `describ
 
 ### Streamed targets
 
-In the demo provider each typed lift handle captures the actor's play generation. The lift increments it in `EndPlay`. When a streamed level becomes hidden, a weak object pointer can still resolve, and Unreal can call `BeginPlay` again on the same actor. Compare the generation before dispatching a cached call. Treat `TargetUnloaded` as the terminal reason for the ride interrupted by level removal and `TargetGone` as the reason for a later call using an expired handle. If the caller lives in the streamed level too, its VM detaches on removal. A persistent caller can await a signal from the streaming controller, then resolve the endpoint again. [Listen-server streaming regression](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
+Use `Lift@ lift = WaitActor("FreightLift", 5.0f)` in a persistent mission. Handle `null` on timeout. The lookup uses the authoritative world's registry and waits for one distinct lift to finish startup motion and accept floor requests. Missing or ambiguous names can become ready on a later tick. When both readiness and expiry become visible on the same update, readiness wins. Omitting the timeout waits indefinitely, zero polls, and a negative or non-finite duration raises a script error. Use the replicated panel wait and the inspector to distinguish `WaitActor` from `LiftTrip.Wait`. In `read_trace`, the lookup ends in `Ready`, `TimedOut` or `Cancelled / WaiterDetached`. A resulting `Lift.MoveTo` has its own ID. [Example mission](../Content/AngelIO/Examples/StreamedLift.as)
+
+The game module defines lift readiness. Other providers can use `FindUniqueActor` on the world registry, supply a side-effect-free predicate to `AngelIO::AwaitCondition`, and return a typed result after resumption with `GetScriptWrappers`. The waiting VM checks the predicate on the game thread. `describe_api` includes the public wrappers. A streamed target can be absent from the saved map when a mission using `WaitActor` is validated.
+
+Each typed lift handle captures the actor's play generation. The lift increments it in `EndPlay`. When a streamed level becomes hidden, Unreal can call `BeginPlay` again on the same actor. Treat `TargetUnloaded` as the terminal reason for a ride interrupted by level removal and `TargetGone` as the reason for calling through the expired handle. A persistent caller can call `WaitActor` again. If its own component belongs to the unloaded room, its VM detaches on removal. [Listen-server streaming regressions](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
 
 ## Listen-server investigation
 
@@ -167,7 +171,7 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
 | `AngelIO.Missions.` | Independent lift instances and overlapping typed operations |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips` using networked PIE |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor` using networked PIE |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 **Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts and maps. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. Pass `--timeout-trace <basename>` from `HandleLifetimeAndTimeout` to verify the poll, expired wait and final arrival for one operation ID. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)

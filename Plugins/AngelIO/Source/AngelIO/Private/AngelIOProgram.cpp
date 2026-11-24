@@ -18,18 +18,49 @@ THIRD_PARTY_INCLUDES_END
 
 namespace
 {
+    struct FConditionWait final : FAngelIOOperation
+    {
+        FConditionWait(UWorld* World, const FString& Label, const FString& Target, TFunction<bool()> InReady)
+            : FAngelIOOperation(World, Label, Target), IsReady(MoveTemp(InReady)) {}
+
+        void Poll() { if (IsReady()) MarkComplete(TEXT("Ready")); }
+        void Timeout() { MarkComplete(TEXT("TimedOut")); }
+        void Detach() { MarkComplete(TEXT("Cancelled"), TEXT("WaiterDetached")); }
+    private:
+        TFunction<bool()> IsReady;
+    };
+
     struct FExecutionScope
     {
         TWeakObjectPtr<UWorld> World;
         TWeakObjectPtr<UActorComponent> Component;
         FGuid InstanceId;
         TSharedPtr<FAngelIOOperation> Pending;
+        TSharedPtr<FConditionWait> Condition;
         TSharedPtr<EAngelIOWaitOutcome> WaitOutcome;
         TOptional<double> Deadline;
         TSharedPtr<FJsonObject> WaitSite;
         FString Label;
     };
     constexpr asPWORD ExecutionKey = 0x41494F;
+
+    FExecutionScope* GetWaitScope(TOptional<double> TimeoutSeconds)
+    {
+        auto* Context = asGetActiveContext();
+        if (!Context) return nullptr;
+        auto* Scope = static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey));
+        if (!Scope || !Scope->World.IsValid())
+        {
+            Context->SetException("Waiting requires a world-backed mission in Run");
+            return nullptr;
+        }
+        if (TimeoutSeconds.IsSet() && (!FMath::IsFinite(*TimeoutSeconds) || *TimeoutSeconds < 0))
+        {
+            Context->SetException("Wait timeout must be finite and non-negative");
+            return nullptr;
+        }
+        return Scope;
+    }
 
     TSharedRef<FJsonObject> CaptureSite()
     {
@@ -40,10 +71,13 @@ namespace
         if (!Scope) return Site;
         Site->SetStringField(TEXT("instanceId"), Scope->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
         const char* Section = nullptr;
-        const int Line = Context->GetLineNumber(0, nullptr, &Section);
+        asUINT Frame = 0;
+        int Line = Context->GetLineNumber(Frame, nullptr, &Section);
+        while (Section && FCStringAnsi::Strcmp(Section, "AngelIO API") == 0 && Frame + 1 < Context->GetCallstackSize())
+            Line = Context->GetLineNumber(++Frame, nullptr, &Section);
         Site->SetNumberField(TEXT("line"), Line);
         if (Section) Site->SetStringField(TEXT("script"), UTF8_TO_TCHAR(Section));
-        if (auto* Function = Context->GetFunction())
+        if (auto* Function = Context->GetFunction(Frame))
             Site->SetStringField(TEXT("function"), UTF8_TO_TCHAR(Function->GetDeclaration()));
         if (auto* Component = Scope->Component.Get())
         {
@@ -128,19 +162,8 @@ TSharedRef<const EAngelIOWaitOutcome> AngelIO::AwaitOperation(TSharedRef<FAngelI
     const FString& Label, TOptional<double> TimeoutSeconds)
 {
     auto Outcome = MakeShared<EAngelIOWaitOutcome>(EAngelIOWaitOutcome::Detached);
-    auto* Context = asGetActiveContext();
-    if (!Context) return Outcome;
-    auto* Scope = static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey));
-    if (!Scope || !Scope->World.IsValid())
-    {
-        Context->SetException("AwaitOperation requires a world-backed mission in Run");
-        return Outcome;
-    }
-    if (TimeoutSeconds.IsSet() && (!FMath::IsFinite(*TimeoutSeconds) || *TimeoutSeconds < 0))
-    {
-        Context->SetException("Wait timeout must be finite and non-negative");
-        return Outcome;
-    }
+    auto* Scope = GetWaitScope(TimeoutSeconds);
+    if (!Scope) return Outcome;
     const bool bPoll = TimeoutSeconds.IsSet() && *TimeoutSeconds == 0;
     *Outcome = Operation->IsComplete() ? EAngelIOWaitOutcome::Completed :
         bPoll ? EAngelIOWaitOutcome::TimedOut : EAngelIOWaitOutcome::Pending;
@@ -159,8 +182,21 @@ TSharedRef<const EAngelIOWaitOutcome> AngelIO::AwaitOperation(TSharedRef<FAngelI
     Scope->WaitOutcome = Outcome;
     if (TimeoutSeconds.IsSet()) Scope->Deadline = Scope->World->GetTimeSeconds() + *TimeoutSeconds;
     Scope->Label = Label.IsEmpty() ? TEXT("Operation") : Label;
-    Context->Suspend();
+    asGetActiveContext()->Suspend();
     return Outcome;
+}
+
+void AngelIO::AwaitCondition(const FString& Label, const FString& Target, TOptional<double> TimeoutSeconds,
+    TFunction<bool()> IsReady)
+{
+    auto* Scope = GetWaitScope(TimeoutSeconds);
+    if (!Scope) return;
+    auto Condition = MakeShared<FConditionWait>(Scope->World.Get(), Label, Target, MoveTemp(IsReady));
+    Condition->Poll();
+    const auto Outcome = AwaitOperation(Condition, Label, TimeoutSeconds);
+    if (*Outcome == EAngelIOWaitOutcome::Pending) Scope->Condition = Condition;
+    else if (*Outcome == EAngelIOWaitOutcome::TimedOut) Condition->Timeout();
+    else if (*Outcome == EAngelIOWaitOutcome::Detached) Condition->Detach();
 }
 
 struct FAngelIOProgram::FImpl
@@ -244,6 +280,7 @@ struct FAngelIOProgram::FImpl
         if (Scope.Pending && Scope.WaitSite)
             if (auto Event = Scope.Pending->AddEvent(TEXT("detach")))
                 Event->SetObjectField(TEXT("waiter"), Scope.WaitSite);
+        if (Scope.Condition) Scope.Condition->Detach();
         if (Context) Context->Release();
         if (Engine) Engine->ShutDownAndRelease();
     }
@@ -491,17 +528,23 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     const auto FirstFunction = Engine.GetGlobalFunctionCount();
     const auto FirstType = Engine.GetObjectTypeCount();
     const auto FirstEnum = Engine.GetEnumCount();
+    TArray<FAngelIOScriptWrapper> Wrappers;
     for (auto* Provider : IModularFeatures::Get().GetModularFeatureImplementations<IAngelIOScriptAPI>(
         IAngelIOScriptAPI::FeatureName()))
     {
         if (!Provider->RegisterBindings(Engine) || Engine.SetDefaultNamespace("") < 0)
             return S.Fail(TEXT("Could not register external AngelIO script bindings"));
+        Provider->GetScriptWrappers(Wrappers);
 #if WITH_EDITOR
         Provider->GetMapLookups(MapLookups);
 #endif
     }
     for (asUINT I = FirstFunction; I < Engine.GetGlobalFunctionCount(); ++I)
-        S.ExternalAPI.Add(UTF8_TO_TCHAR(Engine.GetGlobalFunctionByIndex(I)->GetDeclaration(true, true, true)));
+    {
+        const auto* Function = Engine.GetGlobalFunctionByIndex(I);
+        if (FCStringAnsi::Strcmp(Function->GetNamespace(), "AngelIOInternal") != 0)
+            S.ExternalAPI.Add(UTF8_TO_TCHAR(Function->GetDeclaration(true, true, true)));
+    }
     for (asUINT I = FirstType; I < Engine.GetObjectTypeCount(); ++I)
     {
         auto* Type = Engine.GetObjectTypeByIndex(I);
@@ -522,6 +565,15 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
             UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)), *FString::Join(Names, TEXT(", "))));
     }
     S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
+    FString WrapperSource;
+    for (const auto& Wrapper : Wrappers)
+    {
+        WrapperSource += Wrapper.Declaration + TEXT(" { ") + Wrapper.Body + TEXT(" }\n");
+        S.ExternalAPI.Add(Wrapper.Declaration);
+    }
+    FTCHARToUTF8 WrapperBytes(*WrapperSource);
+    if (WrapperBytes.Length() && S.Module->AddScriptSection("AngelIO API", WrapperBytes.Get(), WrapperBytes.Length()) < 0)
+        return S.Fail(TEXT("Could not register external script wrappers"));
     FTCHARToUTF8 SourceBytes(*Source);
     S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
     if (S.Module->AddScriptSection(TCHAR_TO_UTF8(*Label), SourceBytes.Get(), SourceBytes.Length()) < 0 ||
@@ -614,10 +666,12 @@ bool FAngelIOProgram::ResumeCompletedOperation()
 {
     if (!IsWaitingOnOperation()) return false;
     auto& Scope = Impl->Scope;
+    if (Scope.Condition) Scope.Condition->Poll();
     const bool bComplete = Scope.Pending->IsComplete();
     if (!bComplete && (!Scope.Deadline.IsSet() || !Scope.World.IsValid() ||
         Scope.World->GetTimeSeconds() < *Scope.Deadline)) return false;
     *Scope.WaitOutcome = bComplete ? EAngelIOWaitOutcome::Completed : EAngelIOWaitOutcome::TimedOut;
+    if (Scope.Condition && !bComplete) Scope.Condition->Timeout();
     if (auto Event = Scope.Pending->AddEvent(TEXT("resume")))
     {
         Event->SetObjectField(TEXT("waiter"), Scope.WaitSite);
@@ -627,6 +681,7 @@ bool FAngelIOProgram::ResumeCompletedOperation()
     Scope.Deadline.Reset();
     Scope.WaitSite.Reset();
     Scope.Pending.Reset();
+    Scope.Condition.Reset();
     Impl->Waiting.Reset();
     return Impl->Execute();
 }

@@ -52,23 +52,45 @@ namespace
     };
     using FTripHandle = TScriptHandle<FTripReference>;
 
-    void FindNamedLift(asIScriptGeneric* Call)
+    FString ReadName(asIScriptGeneric* Call)
     {
         const auto& Name = *static_cast<const std::string*>(Call->GetArgObject(0));
-        UWorld* World = AngelIO::GetScriptWorld();
-        AAngelIOExampleLift* Match = nullptr;
-        if (World && !Name.empty() && Name.size() < NAME_SIZE && Name.find('\0') == std::string::npos)
+        if (Name.empty() || Name.size() >= NAME_SIZE || Name.find('\0') != std::string::npos) return {};
+        return UTF8_TO_TCHAR(Name.c_str());
+    }
+
+    AAngelIOExampleLift* ResolveLift(UWorld* World, const FString& Name, bool bRequireReady)
+    {
+        if (!World || Name.IsEmpty()) return nullptr;
+        auto* Registry = World->GetSubsystem<UAngelIOTargetRegistry>();
+        auto* Lift = Cast<AAngelIOExampleLift>(Registry->FindUniqueActor(FName(*Name, FNAME_Find), AAngelIOExampleLift::StaticClass()));
+        if (Lift && bRequireReady && !Lift->IsReadyForTrip())
+            return nullptr;
+        return Lift;
+    }
+
+    void ReturnLift(asIScriptGeneric* Call, bool bRequireReady)
+    {
+        const FString Name = ReadName(Call);
+        auto* Lift = ResolveLift(AngelIO::GetScriptWorld(), Name, bRequireReady);
+        Call->SetReturnAddress(Lift ? new FLiftHandle({Lift, FName(*Name), Lift->GetPlayGeneration()}) : nullptr);
+    }
+    void FindNamedLift(asIScriptGeneric* Call) { ReturnLift(Call, false); }
+    void FindReadyLift(asIScriptGeneric* Call) { ReturnLift(Call, true); }
+
+    void WaitForLift(asIScriptGeneric* Call)
+    {
+        const FString Name = ReadName(Call);
+        if (Name.IsEmpty() || Name.Equals(TEXT("None"), ESearchCase::IgnoreCase))
         {
-            auto* Registry = World->GetSubsystem<UAngelIOTargetRegistry>();
-            for (auto* Endpoint : Registry->FindTargets(FName(UTF8_TO_TCHAR(Name.c_str()), FNAME_Find)))
-            {
-                auto* Lift = Cast<AAngelIOExampleLift>(Endpoint->GetOwner());
-                if (!IsValid(Lift)) continue;
-                if (Match && Match != Lift) { Match = nullptr; break; }
-                Match = Lift;
-            }
+            asGetActiveContext()->SetException("WaitActor requires a valid target name");
+            return;
         }
-        Call->SetReturnAddress(Match ? new FLiftHandle({Match, FName(UTF8_TO_TCHAR(Name.c_str())), Match->GetPlayGeneration()}) : nullptr);
+        TOptional<double> Timeout;
+        if (Call->GetArgCount() == 2) Timeout = Call->GetArgFloat(1);
+        TWeakObjectPtr<UWorld> World = AngelIO::GetScriptWorld();
+        AngelIO::AwaitCondition(TEXT("WaitActor"), Name, Timeout,
+            [World, Name] { return ResolveLift(World.Get(), Name, true) != nullptr; });
     }
 
     void MoveLift(asIScriptGeneric* Call)
@@ -119,6 +141,13 @@ public:
     void StartupModule() override { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
     void ShutdownModule() override { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
     bool SupportsDynamicReloading() override { return false; }
+    void GetScriptWrappers(TArray<FAngelIOScriptWrapper>& Out) const override
+    {
+        Out.Add({TEXT("Lift@ WaitActor(const string &in name)"),
+            TEXT("AngelIOInternal::WaitForLift(name); return AngelIOInternal::FindReadyLift(name);")});
+        Out.Add({TEXT("Lift@ WaitActor(const string &in name, float timeoutSeconds)"),
+            TEXT("AngelIOInternal::WaitForLift(name, timeoutSeconds); return AngelIOInternal::FindReadyLift(name);")});
+    }
 #if WITH_EDITOR
     void GetMapLookups(TArray<FAngelIOMapLookup>& Out) const override
     {
@@ -141,7 +170,12 @@ public:
             Engine.RegisterObjectMethod("LiftTrip", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "TripStatus get_Status() const property", asFUNCTION(TripStatus), asCALL_GENERIC) >= 0 &&
-            Engine.RegisterObjectMethod("TripResult", "int get_Floor() const property", asFUNCTION(TripFloor), asCALL_GENERIC) >= 0;
+            Engine.RegisterObjectMethod("TripResult", "int get_Floor() const property", asFUNCTION(TripFloor), asCALL_GENERIC) >= 0 &&
+            Engine.SetDefaultNamespace("AngelIOInternal") >= 0 &&
+            Engine.RegisterGlobalFunction("void WaitForLift(const string &in)", asFUNCTION(WaitForLift), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterGlobalFunction("void WaitForLift(const string &in, float)", asFUNCTION(WaitForLift), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterGlobalFunction("::Lift@ FindReadyLift(const string &in)", asFUNCTION(FindReadyLift), asCALL_GENERIC) >= 0 &&
+            Engine.SetDefaultNamespace("") >= 0;
     }
 };
 

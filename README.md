@@ -68,7 +68,16 @@ A successful `FindLift("FreightLift")` binds its handle to that particular actor
 
 ### Stream a room containing a lift
 
-A persistent mission can use the level's **On Level Shown** callback to send its component a signal, then call `FindLift` and check for `null`. Before the endpoint registers, the lookup returns `null` and group sends reach only current members. `trip.Wait(seconds)` starts after a ride has been created.
+In a persistent mission, wait for the named lift before starting a ride:
+
+```angelscript
+Lift@ lift = WaitActor("FreightLift", 5.0f);
+if (lift is null)
+    return;
+TripResult@ ride = lift.MoveTo(6, 800.0f).Wait();
+```
+
+`WaitActor` returns when exactly one matching lift has begun play and its mission is ready to accept a floor request. A startup ride can still be in progress when the room appears. Missing, ambiguous and busy lifts keep the caller waiting. The optional timeout is in game seconds. Expiry returns `null`, zero polls immediately, and omitting the argument waits until ready or until the mission stops. A new call after unloading resolves the current lift. The lookup and the subsequent trip have separate trace IDs and deadlines. [Playable controller mission](Content/AngelIO/Examples/StreamedLift.as)
 
 When streaming removes the lift from play during a ride, the persistent caller receives `Cancelled` and the trace records `TargetUnloaded`. Its cached `Lift@` expires at that boundary. Showing the same room again requires a fresh lookup even if Unreal reuses the actor in memory. A mission attached to the streamed room itself ends with its component and starts from `Run` on re-entry when **Start On Begin Play** is enabled.
 
@@ -220,6 +229,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
 | `HandleLifetimeAndTimeout` | Reassigns a name while a script holds the original lift. Checks a timed wait, eventual arrival, a client request to the replacement, replication and the stale handle's cancellation reason. |
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
+| `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.

@@ -4,6 +4,7 @@
 #include "AngelIOTargetRegistry.generated.h"
 
 class UAngelIOScriptComponent;
+class AActor;
 
 UCLASS()
 class ANGELIO_API UAngelIOTargetRegistry : public UWorldSubsystem
@@ -12,6 +13,8 @@ class ANGELIO_API UAngelIOTargetRegistry : public UWorldSubsystem
 public:
     UFUNCTION(BlueprintPure, Category="AngelIO")
     TArray<UAngelIOScriptComponent*> FindTargets(FName TargetName) const;
+    // Multiple matching endpoints on the same owner still identify one actor.
+    AActor* FindUniqueActor(FName TargetName, UClass* ActorClass) const;
 
     // Returns the number of live recipients selected at send time.
     UFUNCTION(BlueprintCallable, Category="AngelIO")
