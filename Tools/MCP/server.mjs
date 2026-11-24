@@ -124,10 +124,10 @@ server.registerTool("describe_api", {
       "SendTo(const string &in target, const string &in input, int value) delivers to live components with this TargetName in the authoritative world.",
       "int SignalValue() reads the last delivered integer payload.",
       "string LoadCheckpoint(int version = 1) reads this room component's saved stage. An absent record or a version mismatch returns an empty string.",
-      "void SaveCheckpoint(const string &in stage, int version = 1) commits a non-empty stage in the authoritative world. Use a positive version.",
+      "void SaveCheckpoint(const string &in stage, int version = 1) commits a non-empty stage to the host's checkpoint slot. Use a positive version. A storage error fails the mission.",
       "Emit(OutputSignal name, int value) publishes after the next suspension or return."
     ],
-    lifetime: "Each component owns its globals. An unmatched signal is dropped. StopScript and EndPlay cancel the instance. Explicit checkpoints survive room unloading within the same world.",
+    lifetime: "Each component owns its globals. An unmatched signal is dropped. StopScript and EndPlay cancel the instance. Explicit checkpoints survive room unloading and server restarts on the same map and named save slot. The default slot is Default.",
     addressing: "TargetName is an explicit case-insensitive logical name. Equal names form a group. Input signal names are case-sensitive. No match means no delivery.",
     network: "Standalone or server executes Run. Relevant clients observe replicated output values and waiting signal. OnSignal stays authoritative. Opted-in presentation signals are unreliable live effects; late joiners read current state."
   });

@@ -8,6 +8,9 @@
   "SupportedTargetPlatforms": [
     "Win64"
   ],
+  "Plugins": [
+    { "Name": "SQLiteCore", "Enabled": true }
+  ],
   "Modules": [
     {
       "Name": "AngelIO",

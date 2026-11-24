@@ -11,6 +11,9 @@
 #include "Widgets/Docking/SDockTab.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
 #include "Engine/Level.h"
@@ -596,6 +599,7 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         auto* Host = FindPeer(NM_ListenServer);
         auto* Client = FindPeer(NM_Client);
         if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
+        Host->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
         Room->Host = LoadLiftRoom(Host, false);
         Room->Client = LoadLiftRoom(Client, false);
         TestTrue(TEXT("Created room on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
@@ -763,6 +767,127 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         return true;
     });
     EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointRestart, "AngelIO.Network.ListenServer.CheckpointRestart",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCheckpointRestart::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    // The default run uses two PIE sessions. The optional GUID runs each half in a separate OS process.
+    FString Token;
+    const bool bWriteOnly = FParse::Value(FCommandLine::Get(), TEXT("AngelIORestartTestWrite="), Token);
+    const bool bReadOnly = FParse::Value(FCommandLine::Get(), TEXT("AngelIORestartTestRead="), Token);
+    FGuid TestId = FGuid::NewGuid();
+    if ((bWriteOnly || bReadOnly) && !TestTrue(TEXT("Pass one restart phase with a test GUID"),
+        bWriteOnly != bReadOnly && FGuid::Parse(Token, TestId))) return false;
+    const FString Slot = TEXT("RestartTest-") + TestId.ToString();
+    const FString File = FPaths::ProjectSavedDir() / TEXT("AngelIO/Checkpoints/PIE") / (TEXT("slot-") + Slot + TEXT(".sqlite3"));
+    if (!TestEqual(TEXT("Only the read phase starts with an existing test slot"), FPaths::FileExists(File), bReadOnly)) return false;
+    const auto Steps = ListenSteps(this);
+    struct FSession
+    {
+        TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
+        FGuid CheckpointId;
+    };
+    const auto Session = MakeShared<FSession>();
+    auto Start = [&]
+    {
+        Steps(TEXT("start a fresh listen server"), []
+        {
+            StartListenSession(TEXT("/Engine/Maps/Entry"));
+            return true;
+        });
+        Steps(TEXT("load delivery room on connected peers"), [this, Session, Slot]
+        {
+            UWorld* Host = FindPeer(NM_ListenServer);
+            UWorld* Client = FindPeer(NM_Client);
+            if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
+            Host->URL.AddOption(*(TEXT("AngelIOCheckpointSlot=") + Slot));
+            Session->Host = LoadLiftRoom(Host, false);
+            Session->Client = LoadLiftRoom(Client, false);
+            TestTrue(TEXT("Both peers created their streamed room"), Session->Host.IsValid() && Session->Client.IsValid());
+            return true;
+        });
+        Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session]
+        {
+            auto* Panel = DeliveryPanel(Session->Host.Get());
+            if (!Panel || !Session->Client->GetLoadedLevel()) return false;
+            Panel->Script = TEXT("Examples/RoomDelivery.as");
+            Panel->bStartOnBeginPlay = true;
+            Session->Host->SetShouldBeVisible(true);
+            Session->Client->SetShouldBeVisible(true);
+            return true;
+        });
+    };
+    auto CheckHistory = [this](int32 ExpectedTrips, const TCHAR* ExpectedEvent)
+    {
+        const auto* Trace = FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>();
+        int32 Trips = 0, Checkpoints = 0;
+        Trace->VisitEvents([&](const FJsonObject& Event, const UObject*)
+        {
+            const TSharedPtr<FJsonObject>* Caller;
+            if (!Event.TryGetObjectField(TEXT("caller"), Caller)) return;
+            FString Script;
+            if (!(*Caller)->TryGetStringField(TEXT("script"), Script) || Script != TEXT("Examples/RoomDelivery.as")) return;
+            FString Operation;
+            if (Event.TryGetStringField(TEXT("operation"), Operation) && Operation == TEXT("Lift.MoveTo")) ++Trips;
+            if (Event.GetStringField(TEXT("type")) == ExpectedEvent && Event.GetStringField(TEXT("stage")) == TEXT("Delivered")) ++Checkpoints;
+        });
+        TestEqual(TEXT("Delivery MoveTo calls in this server session"), Trips, ExpectedTrips);
+        TestEqual(TEXT("Delivered checkpoint in this server session"), Checkpoints, 1);
+    };
+    if (!bReadOnly)
+    {
+        Start();
+        Steps(TEXT("dispatch exactly one delivery"), [this, Session]
+        {
+            auto* Client = DeliveryPanel(Session->Client.Get());
+            if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch")) return false;
+            TestTrue(TEXT("Dispatch accepted"), DeliveryPanel(Session->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
+            return true;
+        });
+        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory]
+        {
+            auto* Client = DeliveryPanel(Session->Client.Get());
+            if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1) ||
+                !AtFloor(FindPeer(NM_Client), 2, 4, 2)) return false;
+            Session->CheckpointId = DeliveryPanel(Session->Host.Get())->InspectMission().CheckpointId;
+            TestTrue(TEXT("Slot exists before teardown"), FPaths::FileExists(File) && Session->CheckpointId.IsValid());
+            CheckHistory(1, TEXT("checkpointSaved"));
+            return true;
+        });
+        EndListenSession();
+    }
+    if (!bWriteOnly)
+    {
+        Start();
+        Steps(TEXT("new server restores Delivered and accepts confirmation"), [this, Session]
+        {
+            auto* Client = DeliveryPanel(Session->Client.Get());
+            if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
+            auto* Panel = DeliveryPanel(Session->Host.Get());
+            const auto Info = Panel->InspectMission();
+            TestEqual(TEXT("Restored stage on replacement server"), Info.RestoredStage, FString(TEXT("Delivered")));
+            if (Session->CheckpointId.IsValid()) TestEqual(TEXT("Checkpoint keeps its identity on disk"), Info.CheckpointId, Session->CheckpointId);
+            TestTrue(TEXT("Recreated mission can finish"), Panel->SendSignal(TEXT("Confirm"), 0));
+            return true;
+        });
+        Steps(TEXT("client sees completion with only the lift's normal startup motion"), [Session, CheckHistory]
+        {
+            if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+            CheckHistory(0, TEXT("checkpointRestored"));
+            return true;
+        });
+        EndListenSession();
+        ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, File]
+        {
+            if (!HasAnyErrors()) TestTrue(TEXT("Remove isolated test slot"), IFileManager::Get().Delete(*File, true));
+            return true;
+        }));
+    }
     return true;
 }
 

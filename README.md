@@ -131,7 +131,9 @@ Call `SaveCheckpoint("Delivered", 1)` after the delivery succeeds. On the next a
 
 In the two-lift map, add a script component to a replicated actor in the streamed room and assign `Examples/RoomDelivery.as`. Send `Dispatch` on the server. The script waits for the freight lift to arrive on floor 4, commits `Delivered` and publishes `out_Stage = 1`. Unload and reload the room. The component now waits for `Confirm`. Sending that signal commits `Complete` and publishes stage 2, which clients also see on a later reload or late join. [Delivery mission](Content/AngelIO/Examples/RoomDelivery.as)
 
-Progress belongs to one instance of the room, one placed actor component and one script, for the lifetime of the server world. Reuse the same level-instance name when recreating a dynamic room. Give a second copy its own instance name for independent progress. Bump the checkpoint version when a script change makes old stage names incompatible. A new PIE session starts fresh.
+The host commits each stage to disk before `SaveCheckpoint` returns, using Unreal's bundled SQLiteCore plugin. Restart the listen server on the same map and slot, then load the room with the same instance name. `RoomDelivery.as` resumes at `Delivered` and waits for `Confirm`, or finishes immediately if it already saved `Complete`. A checkpoint stores mission progress. Lift transforms and other actor state follow the game's own persistence rules.
+
+The default slot is `Default`. To start a separate campaign, open the host map with a different slot, for example `/Game/Demo/TwoLifts?listen?AngelIOCheckpointSlot=Campaign2`. The host stores it under `Saved/AngelIO/Checkpoints/Game/slot-Campaign2.sqlite3`. PIE uses the sibling `PIE` directory. For a session-only playtest, use an explicitly empty `?AngelIOCheckpointSlot=`. Keep the root map, level-instance name, actor/component object name and script path stable. Bump the checkpoint version when old stages become incompatible.
 
 After a reload, select the room's new component in **Tools → AngelIO Mission Inspector**. Under **Mission checkpoint**, **Saved stage** shows the latest commit and **Restored this run** shows the stage read from a previous run. After confirming the example delivery, these read `Complete (v1)` and `Delivered (v1)` respectively. Copy the checkpoint ID and pass it to `read_trace` as `checkpointId` to see the writes and restores in order.
 
@@ -243,6 +245,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
 | `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
 | `MissionCheckpoints` | Interrupts and retries a delivery, reloads both committed stages, checks exactly one arrival and verifies the late client's state and a second room's independent progress. |
+| `CheckpointRestart` | Commits a delivery on a listen server, starts a second host and client on the same slot, and verifies confirmation with zero repeated delivery calls. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.

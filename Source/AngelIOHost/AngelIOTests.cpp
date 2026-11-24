@@ -3,6 +3,10 @@
 #include "AngelIOLiftTrip.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #if WITH_EDITOR
 #include "AngelIOTraceSubsystem.h"
 #include "Dom/JsonObject.h"
@@ -22,6 +26,7 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
     if (!Lift) return false;
     Lift->bRequestOnStart = false;
     if (!Scene.BeginPlayInTestWorld()) return false;
+    World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
     auto Run = [World](const TCHAR* File, UActorComponent* Component, const TCHAR* Body)
     {
         FAngelIOProgram P;
@@ -65,6 +70,38 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
         FString::Join(Stages, TEXT(", ")), FString(TEXT("checkpointSaved Arrived v1, checkpointRestored Arrived v1, ")
             TEXT("checkpointSaved AtDock v2, checkpointRestored AtDock v2")));
 #endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointDiskErrors, "AngelIO.Missions.CheckpointDiskErrors",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCheckpointDiskErrors::RunTest(const FString&)
+{
+    const FString Slot = TEXT("CorruptTest-") + FGuid::NewGuid().ToString();
+    const FString Directory = FPaths::ProjectSavedDir() / TEXT("AngelIO/Checkpoints/Game");
+    const FString File = Directory / (TEXT("slot-") + Slot + TEXT(".sqlite3"));
+    const FString Original = TEXT("Damaged checkpoint database");
+    if (!TestTrue(TEXT("Create isolated damaged slot"), IFileManager::Get().MakeDirectory(*Directory, true) &&
+        FFileHelper::SaveStringToFile(Original, *File))) return false;
+    ON_SCOPE_EXIT { IFileManager::Get().Delete(*File); };
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* World = Scene.GetTestWorld();
+    auto* Lift = World->SpawnActor<AAngelIOExampleLift>();
+    if (!Lift || !Scene.BeginPlayInTestWorld()) return false;
+    World->URL.AddOption(*(TEXT("AngelIOCheckpointSlot=") + Slot));
+    for (const TCHAR* Body : {TEXT("LoadCheckpoint();"), TEXT("SaveCheckpoint(\"Complete\");")})
+    {
+        FAngelIOProgram Program;
+        if (!TestTrue(TEXT("Compile checkpoint probe"), Program.Compile(TEXT("Mission.as"),
+            FString(TEXT("void Run() { ")) + Body + TEXT(" }")))) return false;
+        TestFalse(TEXT("Storage failure stops mission execution"), Program.Start({}, World, Lift->Address));
+        TestTrue(TEXT("Mission diagnostic identifies the checkpoint store"), Program.Diagnostics().ContainsByPredicate(
+            [](const auto& Message){ return Message.Message.Contains(TEXT("checkpoint store")); }));
+    }
+    FString Remaining;
+    TestTrue(TEXT("Invalid storage survives failed load and save intact"), FFileHelper::LoadFileToString(Remaining, *File) && Remaining == Original);
     return true;
 }
 

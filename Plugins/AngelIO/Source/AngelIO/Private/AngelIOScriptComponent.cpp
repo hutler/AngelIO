@@ -161,13 +161,17 @@ FAngelIOMissionInspection UAngelIOScriptComponent::InspectMission() const
     auto Info = Program ? Program->InspectMission() : FAngelIOMissionInspection{};
     if (Info.Script.IsEmpty()) Info.Script = Script;
     if (CanRunMission() && GetOwner()->GetLevel())
-        if (const auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())
-            if (const auto* Record = Store->Find(*this, Info.Script))
+        if (auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())
+        {
+            UAngelIOCheckpointSubsystem::FCheckpoint Record;
+            FString Error;
+            if (Store->Load(*this, Info.Script, Record, Error, true) && Record.Version > 0)
             {
-                Info.CheckpointId = Record->Id;
-                Info.SavedStage = FString(Record->Stage);
-                Info.SavedVersion = Record->Version;
+                Info.CheckpointId = Record.Id;
+                Info.SavedStage = FString(Record.Stage);
+                Info.SavedVersion = Record.Version;
             }
+        }
     return Info;
 }
 #endif

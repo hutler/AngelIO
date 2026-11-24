@@ -7,7 +7,7 @@ public class AngelIO : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine" });
-        PrivateDependencyModuleNames.Add("Json");
+        PrivateDependencyModuleNames.AddRange(new[] { "Json", "SQLiteCore" });
         string sdk = Path.Combine(ModuleDirectory, "..", "ThirdParty", "AngelScript");
         PublicSystemIncludePaths.Add(Path.Combine(sdk, "include"));
         PublicAdditionalLibraries.Add(Path.Combine(sdk, "lib", "Win64", "angelscript.lib"));

@@ -81,7 +81,9 @@ Each typed lift handle captures the actor's play generation. The lift increments
 
 Place the save after the action that establishes the stage. For a native operation, check its terminal result first. On re-entry, branch in `Run()` to re-establish waits and publish the outputs appropriate for that stage. Locals, handles and pending operations belong to the old VM. A checkpoint stores the stage name. An interrupted action follows the retry or recovery logic of the last committed stage. Queued `Emit` and `SendTo` events dispatch when the VM yields or returns, so use a completion signal when delivery itself needs confirmation.
 
-Keys use the level-instance package, the actor/component object path inside that level and the script path. Keep these identities stable when recreating a room. Two copies of the map keep separate records. `TargetName` can change independently. Checkpoints live in server memory until world teardown. A late client observes the restored mission's replicated outputs and waiting signal. [Working mission](../Content/AngelIO/Examples/RoomDelivery.as) · [Listen-server scenario](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
+The durable key uses the root map package, the level-instance package, the actor/component object path inside the level and the script path. PIE package prefixes are removed. Keep the same level-instance name when recreating a dynamic room. Two copies of a room have separate records. `TargetName` can change independently. A late client observes the restored mission's replicated outputs and waiting signal. [Working mission](../Content/AngelIO/Examples/RoomDelivery.as) · [Listen-server scenarios](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
+
+The authority opens its SQLite slot on demand. The default name is `Default`. Use the host map URL option `?AngelIOCheckpointSlot=Campaign2` to select another slot, or an empty value for an in-memory session. Named slots accept up to 64 letters, digits, underscores or hyphens. Look under `Saved/AngelIO/Checkpoints/Game` in a game and `Saved/AngelIO/Checkpoints/PIE` in PIE. Save commits the stage, version, checkpoint ID and writer instance in one transaction. I/O errors fail the script with a diagnostic. A restart with the same slot loads the committed stage and preserves the ID used by the inspector and `read_trace`. Each server session has its own trace export.
 
 ## Listen-server investigation
 
@@ -181,8 +183,10 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
 | `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints` using networked PIE |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart` using networked PIE |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
+
+To verify a process restart, run the automation command above twice with the filter `AngelIO.Network.ListenServer.CheckpointRestart`. Generate a fresh GUID with `[guid]::NewGuid()`. Add `-AngelIORestartTestWrite=<guid>` to the first editor invocation and `-AngelIORestartTestRead=<guid>` to the second. The first host delivers to floor 4 and exits. The second host restores `Delivered`, accepts confirmation and checks for zero delivery calls. Successful completion removes the isolated test slot.
 
 **Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts and maps. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. Pass `--timeout-trace <basename>` from `HandleLifetimeAndTimeout` to verify the poll, expired wait and final arrival for one operation ID. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)
 

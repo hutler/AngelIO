@@ -407,7 +407,8 @@ struct FAngelIOProgram::FImpl
             Context->SetException("Checkpoint store is unavailable in this world");
             return;
         }
-        const UAngelIOCheckpointSubsystem::FCheckpoint* Record;
+        UAngelIOCheckpointSubsystem::FCheckpoint Record;
+        FString Error;
         if (bSave)
         {
             const auto& Stage = *static_cast<const std::string*>(Call->GetArgObject(0));
@@ -416,23 +417,33 @@ struct FAngelIOProgram::FImpl
                 Context->SetException("Checkpoint stage must be non-empty and contain no null characters");
                 return;
             }
-            Record = &Store->Save(*Component, Self->ScriptSection, Version,
-                FUtf8String(reinterpret_cast<const UTF8CHAR*>(Stage.c_str())), Self->Scope.InstanceId);
+            Record.Version = Version;
+            Record.Stage = FUtf8String(reinterpret_cast<const UTF8CHAR*>(Stage.c_str()));
+            Record.SavedBy = Self->Scope.InstanceId;
+            if (!Store->Save(*Component, Self->ScriptSection, Record, Error))
+            {
+                Context->SetException(TCHAR_TO_UTF8(*Error));
+                return;
+            }
         }
         else
         {
-            Record = Store->Find(*Component, Self->ScriptSection);
-            if (!Record || Record->Version != Version) return;
-            Result->assign(reinterpret_cast<const char*>(*Record->Stage), Record->Stage.Len());
+            if (!Store->Load(*Component, Self->ScriptSection, Record, Error))
+            {
+                Context->SetException(TCHAR_TO_UTF8(*Error));
+                return;
+            }
+            if (Record.Version != Version) return;
+            Result->assign(reinterpret_cast<const char*>(*Record.Stage), Record.Stage.Len());
             // Only the first matching read from an earlier run establishes this run's restore point.
-            if (Self->RestoredVersion || Record->SavedBy == Self->Scope.InstanceId) return;
+            if (Self->RestoredVersion || Record.SavedBy == Self->Scope.InstanceId) return;
             Self->RestoredVersion = Version;
 #if WITH_EDITOR
-            Self->RestoredStage = FString(Record->Stage);
+            Self->RestoredStage = FString(Record.Stage);
 #endif
         }
         if (auto* Trace = World->GetSubsystem<UAngelIOTraceSubsystem>())
-            Trace->RecordCheckpoint(bSave, Record->Id, FString(Record->Stage), Version, Record->SavedBy, CaptureSite());
+            Trace->RecordCheckpoint(bSave, Record.Id, FString(Record.Stage), Version, Record.SavedBy, CaptureSite());
     }
     static void LoadCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, false); }
     static void SaveCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, true); }
