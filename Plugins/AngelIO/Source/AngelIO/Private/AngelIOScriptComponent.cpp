@@ -1,4 +1,5 @@
 #include "AngelIOScriptComponent.h"
+#include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOTargetRegistry.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -159,6 +160,14 @@ FAngelIOMissionInspection UAngelIOScriptComponent::InspectMission() const
 {
     auto Info = Program ? Program->InspectMission() : FAngelIOMissionInspection{};
     if (Info.Script.IsEmpty()) Info.Script = Script;
+    if (CanRunMission() && GetOwner()->GetLevel())
+        if (const auto* Store = GetWorld()->GetSubsystem<UAngelIOCheckpointSubsystem>())
+            if (const auto* Record = Store->Find(*this, Info.Script))
+            {
+                Info.CheckpointId = Record->Id;
+                Info.SavedStage = FString(Record->Stage);
+                Info.SavedVersion = Record->Version;
+            }
     return Info;
 }
 #endif

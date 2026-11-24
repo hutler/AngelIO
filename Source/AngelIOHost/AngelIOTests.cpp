@@ -3,6 +3,10 @@
 #include "AngelIOLiftTrip.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
+#if WITH_EDITOR
+#include "AngelIOTraceSubsystem.h"
+#include "Dom/JsonObject.h"
+#endif
 #include "Tests/AngelIOTestSignalObserver.h"
 #include "Tests/AutomationCommon.h"
 
@@ -27,9 +31,9 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
     };
     const TCHAR* File = TEXT("Mission.as");
     TestTrue(TEXT("New checkpoints default to version one"), Run(File, Lift->Address,
-        TEXT("out_Ok = LoadCheckpoint() == \"\"; SaveCheckpoint(\"Arrived\");")));
+        TEXT("out_Ok = LoadCheckpoint() == \"\"; SaveCheckpoint(\"Arrived\"); out_Ok = out_Ok && LoadCheckpoint() == \"Arrived\";")));
     TestTrue(TEXT("A new VM reads version one and can replace it with version two"), Run(File, Lift->Address,
-        TEXT("out_Ok = LoadCheckpoint(2) == \"\" && LoadCheckpoint(1) == \"Arrived\"; SaveCheckpoint(\"AtDock\", 2);")));
+        TEXT("out_Ok = LoadCheckpoint(2) == \"\" && LoadCheckpoint(1) == \"Arrived\" && LoadCheckpoint() == \"Arrived\"; SaveCheckpoint(\"AtDock\", 2);")));
     TestTrue(TEXT("Another script on the same component starts fresh"), Run(TEXT("Other.as"), Lift->Address,
         TEXT("out_Ok = LoadCheckpoint(2) == \"\";")));
     TestTrue(TEXT("Another component of the same actor starts fresh"), Run(File, Lift->Mission,
@@ -45,6 +49,22 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
     TestTrue(TEXT("A component is required"), Fails(TEXT("void Run() { LoadCheckpoint(); }"), nullptr, TEXT("mission component")));
     TestTrue(TEXT("Rejected writes leave the latest version intact"), Run(File, Lift->Address,
         TEXT("out_Ok = LoadCheckpoint() == \"\" && LoadCheckpoint(2) == \"AtDock\";")));
+#if WITH_EDITOR
+    TArray<FString> Stages;
+    TSet<FString> Checkpoints;
+    World->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
+    {
+        FString Id;
+        if (!Event.TryGetStringField(TEXT("checkpointId"), Id)) return;
+        Checkpoints.Add(Id);
+        Stages.Add(FString::Printf(TEXT("%s %s v%d"), *Event.GetStringField(TEXT("type")),
+            *Event.GetStringField(TEXT("stage")), Event.GetIntegerField(TEXT("version"))));
+    });
+    TestEqual(TEXT("Replacing the version retains the identity of the checkpoint"), Checkpoints.Num(), 1);
+    TestEqual(TEXT("Only successful writes and the first matching read from an earlier run are traced"),
+        FString::Join(Stages, TEXT(", ")), FString(TEXT("checkpointSaved Arrived v1, checkpointRestored Arrived v1, ")
+            TEXT("checkpointSaved AtDock v2, checkpointRestored AtDock v2")));
+#endif
     return true;
 }
 

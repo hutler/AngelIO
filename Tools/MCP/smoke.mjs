@@ -8,7 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const { values } = parseArgs({ options: {
-  project: { type: "string" }, editor: { type: "string" }, trace: { type: "string" }, "timeout-trace": { type: "string" }
+  project: { type: "string" }, editor: { type: "string" }, trace: { type: "string" },
+  "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" }
 } });
 const root = path.join(path.dirname(path.resolve(values.project)), "Content", "AngelIO");
 const client = new Client({ name: "angelio-smoke", version: "1" });
@@ -78,6 +79,44 @@ try {
     assert(completions[0].sequence > timed.sequence && completions[0].status === "Arrived");
     assert(history.events.some(e => e.status === "Cancelled" && e.reason === "TargetGone"));
     console.log("read_trace verified waiter timeout and eventual arrival in " + trace);
+  }
+  if (values["checkpoint-trace"]) {
+    const trace = values["checkpoint-trace"];
+    const read = async (args = {}) => {
+      const reply = await call("read_trace", { trace, ...args });
+      assert(!reply.isError, JSON.stringify(reply.content));
+      return reply.structuredContent;
+    };
+    const history = await read({ limit: 200 });
+    assert.equal(history.schemaVersion, 2);
+    assert.equal(history.netMode, "listenServer");
+    const checkpointId = history.events.find(e => e.type === "checkpointSaved").checkpointId;
+    const first = await read({ checkpointId, limit: 2 });
+    assert.equal(first.nextAfterSequence, first.events[1].sequence);
+    const next = await read({ checkpointId, afterSequence: first.nextAfterSequence });
+    assert.equal(next.nextAfterSequence, null);
+    const events = [...first.events, ...next.events];
+    assert.deepEqual(events.map(e => [e.type, e.stage, e.caller.line]), [
+      ["checkpointSaved", "Delivered", 14], ["checkpointRestored", "Delivered", 6],
+      ["checkpointSaved", "Complete", 21], ["checkpointRestored", "Complete", 6]
+    ]);
+    for (const event of events) {
+      assert.equal(event.checkpointId, checkpointId);
+      assert.equal(event.version, 1);
+      assert.equal(event.caller.script, "Examples/RoomDelivery.as");
+      assert.equal(event.caller.component, events[0].caller.component);
+      assert(!("operationId" in event));
+    }
+    for (const [saved, restored] of [[events[0], events[1]], [events[2], events[3]]]) {
+      assert.equal(saved.caller.instanceId, saved.savedByInstanceId);
+      assert.equal(restored.savedByInstanceId, saved.caller.instanceId);
+      assert.notEqual(restored.caller.instanceId, saved.caller.instanceId);
+    }
+    assert.equal(events[1].caller.instanceId, events[2].caller.instanceId);
+    const ride = history.events.find(e => e.operation === "Lift.MoveTo");
+    const tripHistory = await read({ operationId: ride.operationId });
+    assert(tripHistory.events.length && tripHistory.events.every(e => e.operationId === ride.operationId && !e.checkpointId));
+    console.log("read_trace verified checkpoint saves and restores across room reloads in " + trace);
   }
   assert((await call("list_scripts")).structuredContent.scripts.includes("Elevator.as"));
   const api = (await call("describe_api")).structuredContent;

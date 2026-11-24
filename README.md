@@ -133,6 +133,8 @@ In the two-lift map, add a script component to a replicated actor in the streame
 
 Progress belongs to one instance of the room, one placed actor component and one script, for the lifetime of the server world. Reuse the same level-instance name when recreating a dynamic room. Give a second copy its own instance name for independent progress. Bump the checkpoint version when a script change makes old stage names incompatible. A new PIE session starts fresh.
 
+After a reload, select the room's new component in **Tools → AngelIO Mission Inspector**. Under **Mission checkpoint**, **Saved stage** shows the latest commit and **Restored this run** shows the stage read from a previous run. After confirming the example delivery, these read `Complete (v1)` and `Delivered (v1)` respectively. Copy the checkpoint ID and pass it to `read_trace` as `checkpointId` to see the writes and restores in order.
+
 ## Use the plugin in your project
 
 Copy [Plugins/AngelIO](Plugins/AngelIO) into a C++ project and enable the plugin. Put mission files in `Content/AngelIO`. Add `AngelIO` to **Project Settings → Packaging → Additional Non-Asset Directories to Package** so newly added scripts ship with the game. The demo already includes this setting. [Demo packaging configuration](Config/DefaultGame.ini)
@@ -187,8 +189,10 @@ The tab reads the world's in-memory trace. The timeline reports when older event
 | `complete` | One terminal status per operation. A module can supply a reason such as `LiftBusy` or `TargetEndPlay`. |
 | `resume` | A suspended script continues at its wait site after completion. |
 | `detach` | The waiting script was released. The operation can still complete for other waiters. |
+| `checkpointSaved` | The mission saved `stage` and `version`. The `caller` identifies the writing script instance and source line. |
+| `checkpointRestored` | This script instance first read a matching checkpoint saved by an earlier instance. The `caller` identifies the reader and `savedByInstanceId` identifies the writer. |
 
-Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number, world time in seconds and operation ID. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
+Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number and world time in seconds. Operation events carry an `operationId`. Checkpoint events share a `checkpointId` for the same room, component and script across reloads. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
 
 ## MCP tools for editors and agents
 
@@ -216,7 +220,7 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
 | `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
 | `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
-| `read_trace` | An exported operation history, optionally filtered by operation ID and paged by sequence number |
+| `read_trace` | Exported mission events, optionally filtered by operation ID or checkpoint ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
 

@@ -70,6 +70,9 @@ struct FAngelIOMissionInspection
     FString Waiting;
     FGuid Instance;
     FGuid Operation;
+    FGuid CheckpointId;
+    FString SavedStage, RestoredStage;
+    int32 SavedVersion = 0, RestoredVersion = 0;
 };
 #endif
 

@@ -16,13 +16,17 @@ UAngelIOCheckpointSubsystem::FKey UAngelIOCheckpointSubsystem::MakeKey(const UAc
     return {Room + TEXT(":") + Component.GetPathName(Level), MoveTemp(Script)};
 }
 
-FUtf8String UAngelIOCheckpointSubsystem::Load(const UActorComponent& Component, const FString& Script, int32 Version) const
+const UAngelIOCheckpointSubsystem::FCheckpoint* UAngelIOCheckpointSubsystem::Find(const UActorComponent& Component, const FString& Script) const
 {
-    const auto* Record = Records.Find(MakeKey(Component, Script));
-    return Record && Record->Version == Version ? Record->Stage : FUtf8String();
+    return Records.Find(MakeKey(Component, Script));
 }
 
-void UAngelIOCheckpointSubsystem::Save(const UActorComponent& Component, const FString& Script, int32 Version, FUtf8String Stage)
+const UAngelIOCheckpointSubsystem::FCheckpoint& UAngelIOCheckpointSubsystem::Save(const UActorComponent& Component,
+    const FString& Script, int32 Version, FUtf8String Stage, const FGuid& Instance)
 {
-    Records.Add(MakeKey(Component, Script), FCheckpoint{Version, MoveTemp(Stage)});
+    auto& Record = Records.FindOrAdd(MakeKey(Component, Script));
+    Record.SavedBy = Instance;
+    Record.Version = Version;
+    Record.Stage = MoveTemp(Stage);
+    return Record;
 }

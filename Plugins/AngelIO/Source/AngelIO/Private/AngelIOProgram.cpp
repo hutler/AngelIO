@@ -211,7 +211,9 @@ struct FAngelIOProgram::FImpl
     TArray<FAngelIOEvent> Events;
     FExecutionScope Scope;
     FString ScriptSection;
+    int32 RestoredVersion = 0;
 #if WITH_EDITOR
+    FString RestoredStage;
     TArray<FAngelIOLiteralTarget> LiteralTargets;
 
     // The SDK lexer excludes comments and quoted source text from call matching.
@@ -381,7 +383,7 @@ struct FAngelIOProgram::FImpl
     static void AccessCheckpoint(asIScriptGeneric* Call, bool bSave)
     {
         auto* Context = asGetActiveContext();
-        const auto* Self = static_cast<FImpl*>(Context->GetUserData());
+        auto* Self = static_cast<FImpl*>(Context->GetUserData());
         // AngelScript owns the return slot even when a native binding raises an exception.
         std::string* Result = bSave ? nullptr : new (Call->GetAddressOfReturnLocation()) std::string();
         const auto* Component = Self ? Self->Scope.Component.Get() : nullptr;
@@ -405,6 +407,7 @@ struct FAngelIOProgram::FImpl
             Context->SetException("Checkpoint store is unavailable in this world");
             return;
         }
+        const UAngelIOCheckpointSubsystem::FCheckpoint* Record;
         if (bSave)
         {
             const auto& Stage = *static_cast<const std::string*>(Call->GetArgObject(0));
@@ -413,13 +416,23 @@ struct FAngelIOProgram::FImpl
                 Context->SetException("Checkpoint stage must be non-empty and contain no null characters");
                 return;
             }
-            Store->Save(*Component, Self->ScriptSection, Version, FUtf8String(reinterpret_cast<const UTF8CHAR*>(Stage.c_str())));
+            Record = &Store->Save(*Component, Self->ScriptSection, Version,
+                FUtf8String(reinterpret_cast<const UTF8CHAR*>(Stage.c_str())), Self->Scope.InstanceId);
         }
         else
         {
-            const FUtf8String Stage = Store->Load(*Component, Self->ScriptSection, Version);
-            Result->assign(reinterpret_cast<const char*>(*Stage), Stage.Len());
+            Record = Store->Find(*Component, Self->ScriptSection);
+            if (!Record || Record->Version != Version) return;
+            Result->assign(reinterpret_cast<const char*>(*Record->Stage), Record->Stage.Len());
+            // Only the first matching read from an earlier run establishes this run's restore point.
+            if (Self->RestoredVersion || Record->SavedBy == Self->Scope.InstanceId) return;
+            Self->RestoredVersion = Version;
+#if WITH_EDITOR
+            Self->RestoredStage = FString(Record->Stage);
+#endif
         }
+        if (auto* Trace = World->GetSubsystem<UAngelIOTraceSubsystem>())
+            Trace->RecordCheckpoint(bSave, Record->Id, FString(Record->Stage), Version, Record->SavedBy, CaptureSite());
     }
     static void LoadCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, false); }
     static void SaveCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, true); }
@@ -757,6 +770,8 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     Info.State = Impl->Status;
     Info.Script = Impl->ScriptSection;
     Info.Instance = Impl->Scope.InstanceId;
+    Info.RestoredStage = Impl->RestoredStage;
+    Info.RestoredVersion = Impl->RestoredVersion;
     if (Info.State != EAngelIOState::Waiting) return Info;
     Info.Waiting = Impl->Waiting;
     if (Impl->Scope.Pending) Info.Operation = Impl->Scope.Pending->GetOperationId();

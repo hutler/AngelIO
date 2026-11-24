@@ -572,12 +572,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointListen, "AngelIO.Network.List
 bool FAngelIOCheckpointListen::RunTest(const FString&)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    const auto Inspector = SNew(SAngelIOMissionInspector);
     StartListenSession(TEXT("/Engine/Maps/Entry"));
     struct FRoom
     {
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client, Late, CompletedRoom;
         TWeakObjectPtr<UAngelIOScriptComponent> SavedPanel;
-        FGuid SavedInstance;
+        FGuid SavedInstance, CheckpointId;
 
         void Unload() const
         {
@@ -632,10 +633,13 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
     };
     auto Dispatch = [&]
     {
-        Steps(TEXT("a room with no committed delivery accepts dispatch"), [this, Room]
+        Steps(TEXT("a room with no committed delivery accepts dispatch"), [this, Room, Inspector]
         {
             auto* Client = DeliveryPanel(Room->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch") || !TripOutput(Client, TEXT("Stage"), 0)) return false;
+            Inspector->SelectWorld(FindPeer(NM_ListenServer));
+            Inspector->SelectMission(DeliveryPanel(Room->Host.Get()));
+            TestTrue(TEXT("Fresh or interrupted delivery shows no checkpoint"), Inspector->CheckpointSummary().IsEmpty());
             TestFalse(TEXT("Client cannot advance the authoritative mission"), Client->SendSignal(TEXT("Confirm"), 0));
             TestTrue(TEXT("Dispatch the freight lift"), DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
             return true;
@@ -651,17 +655,22 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
     });
     ReloadRoom();
     Dispatch();
-    Steps(TEXT("successful arrival commits Delivered"), [Room]
+    Steps(TEXT("successful arrival commits Delivered"), [this, Room, Inspector]
     {
         auto* Client = DeliveryPanel(Room->Client.Get());
         if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
         Room->SavedPanel = DeliveryPanel(Room->Host.Get());
         Room->SavedInstance = Room->SavedPanel->InspectMission().Instance;
+        Inspector->Refresh();
+        Room->CheckpointId = Inspector->Inspection.CheckpointId;
+        TestTrue(TEXT("First delivery has a checkpoint ID"), Room->CheckpointId.IsValid());
+        TestEqual(TEXT("Inspector shows the save before the first restore"), Inspector->CheckpointSummary(),
+            FString(TEXT("Saved stage: Delivered (v1)\nNo checkpoint restored this run")));
         Room->Unload();
         return true;
     });
     ReloadRoom();
-    Steps(TEXT("a new VM restores Delivered and waits for confirmation"), [this, Room]
+    Steps(TEXT("a new VM restores Delivered and waits for confirmation"), [this, Room, Inspector]
     {
         auto* Client = DeliveryPanel(Room->Client.Get());
         if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
@@ -669,9 +678,20 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         TestTrue(TEXT("Restored stage in a fresh VM"), Room->SavedInstance.IsValid() &&
             Panel->InspectMission().Instance != Room->SavedInstance);
         TestTrue(TEXT("Checkpoint survives replacement of the original component"), Room->SavedPanel.Get() != Panel);
+        Inspector->SelectWorld(Client->GetWorld());
+        Inspector->SelectMission(Client);
+        if (!Inspector->AuthorityMission.IsValid()) return false;
+        TestTrue(TEXT("Client inspector resolves the replacement server component"), Inspector->AuthorityMission.Get() == Panel);
+        TestEqual(TEXT("Reload retains the checkpoint ID"), Inspector->Inspection.CheckpointId, Room->CheckpointId);
+        TestEqual(TEXT("Reloaded client selection shows Delivered from the server VM"), Inspector->CheckpointSummary(),
+            FString(TEXT("Saved stage: Delivered (v1)\nRestored this run: Delivered (v1)")));
+        TestTrue(TEXT("A restore alone does not add an operation to the picker"), Inspector->Operations.IsEmpty());
         TestEqual(TEXT("Second component using the same script has independent progress"),
             DeliveryPanel(Room->Host.Get(), 2)->GetWaitingSignal(), FString(TEXT("Dispatch")));
         TestTrue(TEXT("Restored signal subscription accepts confirmation"), Panel->SendSignal(TEXT("Confirm"), 0));
+        Inspector->Refresh();
+        TestEqual(TEXT("New save keeps the stage this VM resumed from"), Inspector->CheckpointSummary(),
+            FString(TEXT("Saved stage: Complete (v1)\nRestored this run: Delivered (v1)")));
         return true;
     });
     Steps(TEXT("client observes completion before unload"), [Room]
@@ -681,15 +701,20 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         return true;
     });
     ReloadRoom();
-    Steps(TEXT("restore terminal progress and verify the delivery history"), [this, Room]
+    Steps(TEXT("restore terminal progress and verify the delivery history"), [this, Room, Inspector]
     {
         if (!TripOutput(DeliveryPanel(Room->Client.Get()), TEXT("Stage"), 2)) return false;
         TestTrue(TEXT("Completed mission finishes immediately"), DeliveryPanel(Room->Host.Get())->InspectMission().State == EAngelIOState::Finished);
+        Inspector->SelectWorld(FindPeer(NM_ListenServer));
+        Inspector->SelectMission(DeliveryPanel(Room->Host.Get()));
+        TestEqual(TEXT("Completed mission shows the new restore point"), Inspector->CheckpointSummary(),
+            FString(TEXT("Saved stage: Complete (v1)\nRestored this run: Complete (v1)")));
         TSet<FString> Deliveries;
         int32 Arrivals = 0, Interruptions = 0;
         FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& E, const UObject*)
         {
-            const FString Id = E.GetStringField(TEXT("operationId"));
+            FString Id;
+            if (!E.TryGetStringField(TEXT("operationId"), Id)) return;
             const FString Type = E.GetStringField(TEXT("type"));
             if (Type == TEXT("call") && E.GetStringField(TEXT("operation")) == TEXT("Lift.MoveTo") &&
                 E.GetObjectField(TEXT("caller"))->GetStringField(TEXT("script")) == TEXT("Examples/RoomDelivery.as"))
@@ -723,12 +748,18 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         return true;
     });
     ShowRoom();
-    Steps(TEXT("identical actor and component names in a second room start fresh"), [this, Room]
+    Steps(TEXT("identical actor and component names in a second room start fresh"), [this, Room, Inspector]
     {
         auto* Client = DeliveryPanel(Room->Client.Get());
         if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch")) return false;
         TestTrue(TEXT("Room instance isolates progress"), TripOutput(Client, TEXT("Stage"), 0) &&
             TripOutput(DeliveryPanel(Room->CompletedRoom.Get()), TEXT("Stage"), 2));
+        Inspector->SelectMission(DeliveryPanel(Room->Host.Get()));
+        TestTrue(TEXT("Selecting a different room clears the checkpoint display"), Inspector->CheckpointSummary().IsEmpty());
+        FString Path;
+        if (TestTrue(TEXT("Export mixed checkpoint and operation history"),
+            FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Path)))
+            AddInfo(TEXT("Checkpoint trace: ") + Path);
         return true;
     });
     EndListenSession();

@@ -5,7 +5,7 @@
 
 class FJsonObject;
 
-// One bounded operation history per authoritative game world.
+// One bounded mission history per authoritative game world.
 UCLASS()
 class ANGELIO_API UAngelIOTraceSubsystem : public UWorldSubsystem
 {
@@ -14,6 +14,8 @@ public:
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
     virtual void Deinitialize() override;
     bool Export(FString& OutFile) const;
+    void RecordCheckpoint(bool bSaved, const FGuid& CheckpointId, const FString& Stage, int32 Version,
+        const FGuid& SavedBy, TSharedRef<FJsonObject> Caller);
 #if WITH_EDITOR
     int64 GetInspectionRevision() const { return Total + ForgottenTargets; }
     int64 GetDroppedEventCount() const { return Total - Events.Num(); }

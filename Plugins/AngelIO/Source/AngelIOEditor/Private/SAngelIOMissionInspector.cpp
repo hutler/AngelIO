@@ -205,6 +205,14 @@ void SAngelIOMissionInspector::Construct(const FArguments&)
             + SVerticalBox::Slot().AutoHeight().Padding(0,8,0,1)
             [ SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Bold", 13)).Text_Lambda([this]{return FText::FromString(Location);}) ]
             + SVerticalBox::Slot().AutoHeight()[SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(Wait);})]
+            + SVerticalBox::Slot().AutoHeight()
+            [ SNew(SVerticalBox).Visibility_Lambda([this]{return Inspection.CheckpointId.IsValid() ? EVisibility::Visible : EVisibility::Collapsed;})
+                + SVerticalBox::Slot().AutoHeight().Padding(0,10,0,3)[Heading(TEXT("Mission checkpoint"))]
+                + SVerticalBox::Slot().AutoHeight()
+                [ SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(CheckpointSummary());}) ]
+                + SVerticalBox::Slot().AutoHeight()
+                [ SNew(SEditableTextBox).IsReadOnly(true).ToolTipText(FText::FromString(TEXT("Checkpoint ID for read_trace")))
+                    .Text_Lambda([this]{return FText::FromString(Inspection.CheckpointId.ToString(EGuidFormats::DigitsWithHyphensLower));}) ] ]
             + SVerticalBox::Slot().AutoHeight().Padding(0,14,0,3)[Heading(TEXT("Operation history"))]
             + SVerticalBox::Slot().AutoHeight()
             [ SNew(SComboButton).IsEnabled_Lambda([this]{return !Operations.IsEmpty();}).OnGetMenuContent(this, &SAngelIOMissionInspector::OperationMenu)
@@ -365,6 +373,17 @@ void SAngelIOMissionInspector::Refresh()
     }
 }
 
+FString SAngelIOMissionInspector::CheckpointSummary() const
+{
+    if (!Inspection.CheckpointId.IsValid()) return {};
+    FString Text = FString::Printf(TEXT("Saved stage: %s (v%d)"), *Inspection.SavedStage, Inspection.SavedVersion);
+    if (Inspection.RestoredVersion)
+        Text += FString::Printf(TEXT("\nRestored this run: %s (v%d)"), *Inspection.RestoredStage, Inspection.RestoredVersion);
+    else
+        Text += TEXT("\nNo checkpoint restored this run");
+    return Text;
+}
+
 void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority)
 {
     Operations.Reset();
@@ -384,12 +403,14 @@ void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority
     });
     Trace->VisitEvents([&](const FJsonObject& Event, const UObject* Target)
     {
+        FString OperationId;
+        if (!Event.TryGetStringField(TEXT("operationId"), OperationId)) return;
         const auto* Caller = Site(Event, TEXT("caller"));
         const auto* Waiter = Site(Event, TEXT("waiter"));
         if (Target == &Authority || Target == Authority.GetOwner() ||
             (Caller && Field(*Caller, TEXT("instanceId")) == Instance) ||
             (Waiter && Field(*Waiter, TEXT("instanceId")) == Instance))
-            Related.FindOrAdd(Field(Event, TEXT("operationId")));
+            Related.FindOrAdd(OperationId);
     });
     Trace->VisitEvents([&](const FJsonObject& Event, const UObject*)
     {

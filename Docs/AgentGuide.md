@@ -105,13 +105,15 @@ From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server
 | `describe_api` | `{}` | `entry`, `portTypes`, `calls`, `externalDeclarations` and delivery rules for this project |
 | `validate_script` | `{"script":"TypedLift.as"}` | `valid`, `ports` with name/type/direction, `inputSignals`, `outputSignals`, `externalDeclarations`, `diagnostics` |
 | `validate_map` | `{"map":"/Game/Demo/TwoLifts"}` | `map`, `valid`, `missionsChecked`, and diagnostics with `code`, `severity`, `message`, `actor`, `component`, `script`, `field`, `line`, `column` |
-| `read_trace` | Optional fields are `trace` (export basename), `operationId` (hyphenated GUID), `afterSequence` (exclusive, default 0), `limit` (1–200, default 50) | `trace`, `schemaVersion`, `sessionId`, `world`, `netMode`, `droppedEvents`, `events`, `nextAfterSequence` |
+| `read_trace` | Optional fields are `trace` (export basename), either `operationId` or `checkpointId` (hyphenated GUID), `afterSequence` (exclusive, default 0), `limit` (1–200, default 50) | `trace`, `schemaVersion`, `sessionId`, `world`, `netMode`, `droppedEvents`, `events`, `nextAfterSequence` |
 
 **Editing loop.** Call `list_scripts`, `describe_api`, and `read_script`. Edit the file with the workspace editor, then send its relative path to `validate_script`. A compiler error is a successful tool response with `valid: false`. Read each diagnostic's `severity`, `message`, `line` and `column`. A path or tool execution error sets `isError`. A valid report confirms compilation and public declarations. Use PIE for actor lookup, movement, replication and completion.
 
 **Map checks.** Use **Tools → Validate AngelIO Missions** for the current editor world, or `validate_map` for a saved package. Each distinct script compiles once per check. `input_unknown` and `input_type` identify the component's initial override. `target_missing` and `target_ambiguous` identify a direct literal lookup and its source line. Providers can register global lookup names, actor types and the required cardinality through `GetMapLookups`. Use a unique global function name for each addressing rule. The static check recognizes unqualified calls with a plain double-quoted first argument. Escaped strings, expressions and names shadowed by a script function or method are skipped. The validator examines loaded placed actors and the configured player controller's mission templates. Exercise computed names and streamed or spawned targets in PIE.
 
 **Trace lookup.** Call `read_trace` with `{}` for the latest snapshot, or pass the basename from the host log. Preserve the returned `trace` for every subsequent call. Find the `call` with the desired `operation`, `target`, `arguments` and `caller`. Pass its `operationId` and the same `trace` to read the ride. If `nextAfterSequence` is a number, pass it as `afterSequence` with the same filters and repeat until it is `null`. The filename pins the snapshot even when another PIE world exports during paging.
+
+**Checkpoint lookup.** After a room reloads, select the recreated component in the inspector. Copy its checkpoint ID and call `read_trace` with the same `trace` and that `checkpointId`. For `RoomDelivery.as`, expect `checkpointSaved(Delivered) → checkpointRestored(Delivered) → checkpointSaved(Complete) → checkpointRestored(Complete)` across two reloads. Each event includes the stage, version, writer's `savedByInstanceId`, and the current `caller` with its component, instance ID, script and line. The first successful load from a previous VM produces one restore event per run. Empty reads, version mismatches and reads of the VM's own writes leave the restore point unchanged. The inspector reads the saved record and the current VM directly, so their stages remain visible when older trace events expire. New exports use schema version 2. The tool also accepts version 1 operation histories.
 
 | Observed event sequence | Interpretation |
 | --- | --- |
@@ -183,6 +185,8 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 **Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts and maps. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. Pass `--timeout-trace <basename>` from `HandleLifetimeAndTimeout` to verify the poll, expired wait and final arrival for one operation ID. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)
+
+Pass `--checkpoint-trace <basename>` from the `Checkpoint trace` line in the `MissionCheckpoints` test log to verify checkpoint filtering, pagination, stages, source lines and writer/reader identities.
 
 ```powershell
 npm ci --prefix Tools/MCP

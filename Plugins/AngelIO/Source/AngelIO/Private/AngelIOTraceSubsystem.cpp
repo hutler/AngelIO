@@ -29,7 +29,8 @@ TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId,
     auto Event = MakeShared<FJsonObject>();
     Event->SetNumberField(TEXT("sequence"), Total + 1);
     Event->SetNumberField(TEXT("worldSeconds"), GetWorld()->GetTimeSeconds());
-    Event->SetStringField(TEXT("operationId"), OperationId.ToString(EGuidFormats::DigitsWithHyphensLower));
+    if (OperationId.IsValid())
+        Event->SetStringField(TEXT("operationId"), OperationId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Event->SetStringField(TEXT("type"), EventType);
     FEntry Entry;
     Entry.Json = Event;
@@ -44,13 +45,24 @@ TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId,
     return Event;
 }
 
+void UAngelIOTraceSubsystem::RecordCheckpoint(bool bSaved, const FGuid& CheckpointId, const FString& Stage, int32 Version,
+    const FGuid& SavedBy, TSharedRef<FJsonObject> Caller)
+{
+    auto Event = Append({}, bSaved ? TEXT("checkpointSaved") : TEXT("checkpointRestored"), nullptr);
+    Event->SetStringField(TEXT("checkpointId"), CheckpointId.ToString(EGuidFormats::DigitsWithHyphensLower));
+    Event->SetStringField(TEXT("stage"), Stage);
+    Event->SetNumberField(TEXT("version"), Version);
+    Event->SetStringField(TEXT("savedByInstanceId"), SavedBy.ToString(EGuidFormats::DigitsWithHyphensLower));
+    Event->SetObjectField(TEXT("caller"), Caller);
+}
+
 bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
 {
     check(IsInGameThread());
     OutFile.Reset();
     if (Events.IsEmpty()) return false;
     auto Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("schemaVersion"), 1);
+    Root->SetNumberField(TEXT("schemaVersion"), 2);
     Root->SetStringField(TEXT("sessionId"), SessionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Root->SetStringField(TEXT("world"), GetWorld()->GetName());
     Root->SetStringField(TEXT("netMode"), NetMode);
@@ -114,7 +126,7 @@ void UAngelIOTraceSubsystem::VisitEvents(TFunctionRef<void(const FJsonObject&, c
 #endif
 
 static FAutoConsoleCommandWithWorld ExportTraceCommand(TEXT("AngelIO.ExportTrace"),
-    TEXT("Export this world's operation history to Saved/AngelIO/Traces."),
+    TEXT("Export this world's mission history to Saved/AngelIO/Traces."),
     FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
     {
         auto* Trace = World ? World->GetSubsystem<UAngelIOTraceSubsystem>() : nullptr;

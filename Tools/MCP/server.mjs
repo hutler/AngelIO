@@ -62,25 +62,34 @@ server.registerTool("read_script", {
 const traceFilename = /^\d{8}-\d{6}-\d{3}-[a-f0-9]{32}\.json$/i;
 // FGuid uses 128 bits without RFC UUID version/variant constraints.
 const guid = z.string().regex(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
-const traceSchema = z.object({
-  schemaVersion: z.literal(1), sessionId: guid, world: z.string(), netMode: z.string(),
-  droppedEvents: z.number().int().nonnegative(), events: z.array(z.object({
-    sequence: z.number().int().positive(), operationId: guid, worldSeconds: z.number(),
-    type: z.enum(["call", "wait", "complete", "resume", "detach"])
-  }).passthrough())
-});
+const eventFields = { sequence: z.number().int().positive(), worldSeconds: z.number() };
+const operationEvent = z.object({
+  ...eventFields, operationId: guid, type: z.enum(["call", "wait", "complete", "resume", "detach"])
+}).passthrough();
+const checkpointEvent = z.object({
+  ...eventFields, type: z.enum(["checkpointSaved", "checkpointRestored"]), checkpointId: guid,
+  stage: z.string().min(1), version: z.number().int().positive(), savedByInstanceId: guid,
+  caller: z.object({ instanceId: guid, script: z.string(), line: z.number().int(), component: z.string() }).passthrough()
+}).passthrough();
+const traceFields = { sessionId: guid, world: z.string(), netMode: z.string(), droppedEvents: z.number().int().nonnegative() };
+const traceSchema = z.discriminatedUnion("schemaVersion", [
+  z.object({ ...traceFields, schemaVersion: z.literal(1), events: z.array(operationEvent) }),
+  z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) })
+]);
 
 server.registerTool("read_trace", {
-  description: "Read an exported operation history from Saved/AngelIO/Traces. Defaults to the latest export. Follow operationId from call to wait and completion. Reuse the returned trace filename when paging.",
+  description: "Read exported mission events from Saved/AngelIO/Traces. Follow a ride by operationId or follow saved and restored stages across room reloads by checkpointId. Omit both to browse the history. Reuse the returned trace filename when paging.",
   inputSchema: {
     trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
     operationId: guid.optional(),
+    checkpointId: guid.optional().describe("Checkpoint ID from the mission inspector or a checkpoint event."),
     afterSequence: z.number().int().nonnegative().default(0),
     limit: z.number().int().min(1).max(200).default(50)
   }, annotations
-}, async ({ trace, operationId, afterSequence, limit }) => {
+}, async ({ trace, operationId, checkpointId, afterSequence, limit }) => {
+  if (operationId && checkpointId) throw new Error("Choose either operationId or checkpointId.");
   const directory = path.join(path.dirname(project), "Saved", "AngelIO", "Traces");
-  const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with operation events.";
+  const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with mission events.";
   let entries;
   try { entries = await readdir(directory, { withFileTypes: true }); }
   catch (error) { if (error.code === "ENOENT") throw new Error(noExports); throw error; }
@@ -91,8 +100,10 @@ server.registerTool("read_trace", {
   const target = await realpath(path.join(directory, filename));
   if (path.relative(directory, target) !== filename) throw new Error("Trace resolves outside the project trace directory");
   const { events, ...metadata } = traceSchema.parse(JSON.parse(await readFile(target, "utf8")));
-  const id = operationId?.toLowerCase();
-  const matches = events.filter(event => event.sequence > afterSequence && (!id || event.operationId === id));
+  const operation = operationId?.toLowerCase();
+  const checkpoint = checkpointId?.toLowerCase();
+  const matches = events.filter(event => event.sequence > afterSequence &&
+    (!operation || event.operationId === operation) && (!checkpoint || event.checkpointId === checkpoint));
   const page = matches.slice(0, limit);
   return result({ trace: filename, ...metadata, events: page,
     nextAfterSequence: matches.length > limit ? page.at(-1).sequence : null });
