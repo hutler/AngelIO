@@ -97,10 +97,12 @@ try {
     const next = await read({ checkpointId, afterSequence: first.nextAfterSequence });
     assert.equal(next.nextAfterSequence, null);
     const events = [...first.events, ...next.events];
-    assert.deepEqual(events.map(e => [e.type, e.stage, e.caller.line]), [
-      ["checkpointSaved", "Delivered", 14], ["checkpointRestored", "Delivered", 6],
-      ["checkpointSaved", "Complete", 21], ["checkpointRestored", "Complete", 6]
-    ]);
+    // Older exports predate the durable dispatch stage.
+    const hasDispatch = events[0].stage === "Dispatched";
+    const expected = hasDispatch ? [["checkpointSaved", "Dispatched", 10], ["checkpointRestored", "Dispatched", 6]] : [];
+    expected.push(["checkpointSaved", "Delivered", hasDispatch ? 19 : 14], ["checkpointRestored", "Delivered", 6],
+      ["checkpointSaved", "Complete", hasDispatch ? 26 : 21], ["checkpointRestored", "Complete", 6]);
+    assert.deepEqual(events.map(e => [e.type, e.stage, e.caller.line]), expected);
     for (const event of events) {
       assert.equal(event.checkpointId, checkpointId);
       assert.equal(event.version, 1);
@@ -108,12 +110,13 @@ try {
       assert.equal(event.caller.component, events[0].caller.component);
       assert(!("operationId" in event));
     }
-    for (const [saved, restored] of [[events[0], events[1]], [events[2], events[3]]]) {
+    for (let i = 0; i < events.length; i += 2) {
+      const [saved, restored] = events.slice(i, i + 2);
       assert.equal(saved.caller.instanceId, saved.savedByInstanceId);
       assert.equal(restored.savedByInstanceId, saved.caller.instanceId);
       assert.notEqual(restored.caller.instanceId, saved.caller.instanceId);
+      if (i > 0) assert.equal(saved.caller.instanceId, events[i - 1].caller.instanceId);
     }
-    assert.equal(events[1].caller.instanceId, events[2].caller.instanceId);
     const ride = history.events.find(e => e.operation === "Lift.MoveTo");
     const tripHistory = await read({ operationId: ride.operationId });
     assert(tripHistory.events.length && tripHistory.events.every(e => e.operationId === ride.operationId && !e.checkpointId));

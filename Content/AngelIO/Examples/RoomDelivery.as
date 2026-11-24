@@ -1,5 +1,5 @@
 enum InputSignal { Dispatch, Confirm }
-int out_Stage; // 0 = awaiting dispatch, 1 = delivered, 2 = complete
+int out_Stage; // 0 = awaiting delivery, 1 = delivered, 2 = complete
 
 void Run()
 {
@@ -7,6 +7,11 @@ void Run()
     if (stage == "")
     {
         WaitFor(InputSignal::Dispatch);
+        SaveCheckpoint("Dispatched", 1);
+        stage = "Dispatched";
+    }
+    if (stage == "Dispatched")
+    {
         Lift@ lift = WaitActor("FreightLift");
         TripResult@ ride = lift.MoveTo(4, 800.0f).Wait();
         if (ride.Status != TripStatus::Arrived)

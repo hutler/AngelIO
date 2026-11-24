@@ -19,6 +19,7 @@
 #include "Engine/Level.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "EngineUtils.h"
+#include "GameFramework/WorldSettings.h"
 #include "Settings/LevelEditorPlaySettings.h"
 #include "Misc/AutomationTest.h"
 
@@ -650,22 +651,18 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         });
         ShowRoom();
     };
-    auto Dispatch = [&]
-    {
-        Steps(TEXT("a room with no committed delivery accepts dispatch"), [this, Room, Inspector]
-        {
-            auto* Client = DeliveryPanel(Room->Client.Get());
-            if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch") || !TripOutput(Client, TEXT("Stage"), 0)) return false;
-            Inspector->SelectWorld(FindPeer(NM_ListenServer));
-            Inspector->SelectMission(DeliveryPanel(Room->Host.Get()));
-            TestTrue(TEXT("Fresh or interrupted delivery shows no checkpoint"), Inspector->CheckpointSummary().IsEmpty());
-            TestFalse(TEXT("Client cannot advance the authoritative mission"), Client->SendSignal(TEXT("Confirm"), 0));
-            TestTrue(TEXT("Dispatch the freight lift"), DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
-            return true;
-        });
-    };
     ShowRoom();
-    Dispatch();
+    Steps(TEXT("a room with no committed delivery accepts dispatch"), [this, Room, Inspector]
+    {
+        auto* Client = DeliveryPanel(Room->Client.Get());
+        if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch") || !TripOutput(Client, TEXT("Stage"), 0)) return false;
+        Inspector->SelectWorld(FindPeer(NM_ListenServer));
+        Inspector->SelectMission(DeliveryPanel(Room->Host.Get()));
+        TestTrue(TEXT("Fresh delivery shows no checkpoint"), Inspector->CheckpointSummary().IsEmpty());
+        TestFalse(TEXT("Client cannot advance the authoritative mission"), Client->SendSignal(TEXT("Confirm"), 0));
+        TestTrue(TEXT("Dispatch the freight lift"), DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
+        return true;
+    });
     Steps(TEXT("unload before the ride can commit its checkpoint"), [Room]
     {
         if (DeliveryPanel(Room->Host.Get())->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
@@ -673,18 +670,17 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         return true;
     });
     ReloadRoom();
-    Dispatch();
     Steps(TEXT("successful arrival commits Delivered"), [this, Room, Inspector]
     {
         auto* Client = DeliveryPanel(Room->Client.Get());
         if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
         Room->SavedPanel = DeliveryPanel(Room->Host.Get());
         Room->SavedInstance = Room->SavedPanel->InspectMission().Instance;
-        Inspector->Refresh();
+        Inspector->SelectMission(Room->SavedPanel.Get());
         Room->CheckpointId = Inspector->Inspection.CheckpointId;
         TestTrue(TEXT("First delivery has a checkpoint ID"), Room->CheckpointId.IsValid());
-        TestEqual(TEXT("Inspector shows the save before the first restore"), Inspector->CheckpointSummary(),
-            FString(TEXT("Saved stage: Delivered (v1)\nNo checkpoint restored this run")));
+        TestEqual(TEXT("Inspector shows the stage that retried the delivery"), Inspector->CheckpointSummary(),
+            FString(TEXT("Saved stage: Delivered (v1)\nRestored this run: Dispatched (v1)")));
         Room->Unload();
         return true;
     });
@@ -785,10 +781,18 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
     return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointRestart, "AngelIO.Network.ListenServer.CheckpointRestart",
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FAngelIOCheckpointRestart, "AngelIO.Network.ListenServer",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FAngelIOCheckpointRestart::RunTest(const FString&)
+void FAngelIOCheckpointRestart::GetTests(TArray<FString>& Names, TArray<FString>& Commands) const
+{
+    Names.Add(TEXT("CheckpointRestart"));
+    Commands.Add(TEXT("Delivered"));
+    Names.Add(TEXT("MidRideRestart"));
+    Commands.Add(TEXT("Dispatched"));
+}
+
+bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
     // The default run uses two PIE sessions. The optional GUID runs each half in a separate OS process.
@@ -798,7 +802,8 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
     FGuid TestId = FGuid::NewGuid();
     if ((bWriteOnly || bReadOnly) && !TestTrue(TEXT("Pass one restart phase with a test GUID"),
         bWriteOnly != bReadOnly && FGuid::Parse(Token, TestId))) return false;
-    const FString Slot = TEXT("RestartTest-") + TestId.ToString();
+    const bool bMidRide = InitialStage == TEXT("Dispatched");
+    const FString Slot = (bMidRide ? TEXT("MidRideTest-") : TEXT("RestartTest-")) + TestId.ToString();
     const FString File = FPaths::ProjectSavedDir() / TEXT("AngelIO/Checkpoints/PIE") / (TEXT("slot-") + Slot + TEXT(".sqlite3"));
     if (!TestEqual(TEXT("Only the read phase starts with an existing test slot"), FPaths::FileExists(File), bReadOnly)) return false;
     const auto Steps = ListenSteps(this);
@@ -807,6 +812,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
         FGuid CheckpointId;
         FVector FloorFourLocation;
+        TStrongObjectPtr<UAngelIOTestSignalObserver> Motion{NewObject<UAngelIOTestSignalObserver>()};
     };
     const auto Session = MakeShared<FSession>();
     auto Start = [&]
@@ -827,12 +833,21 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             TestTrue(TEXT("Both peers created their streamed room"), Session->Host.IsValid() && Session->Client.IsValid());
             return true;
         });
-        Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session]
+        Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session, bMidRide]
         {
             auto* Panel = DeliveryPanel(Session->Host.Get());
             auto* FreightAddress = DeliveryPanel(Session->Host.Get(), 2);
             if (!Panel || !FreightAddress || !Session->Client->GetLoadedLevel()) return false;
             auto* Freight = CastChecked<AAngelIOExampleLift>(FreightAddress->GetOwner());
+            if (bMidRide)
+            {
+                // Leave enough network frames to observe both peers strictly between landings.
+                Freight->GetWorld()->GetWorldSettings()->SetTimeDilation(0.35f);
+                Session->Motion->Cab = Freight;
+                Session->Motion->DepartureForFloorFour.Reset();
+                Session->Motion->GameplayEvents = 0;
+                Freight->Mission->OnSignal.AddDynamic(Session->Motion.Get(), &UAngelIOTestSignalObserver::OnGameplay);
+            }
             FAngelIOValue StartFloor;
             StartFloor.Integer = 3;
             Freight->Mission->InitialInputs.Add(TEXT("StartingFloor"), StartFloor);
@@ -890,7 +905,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
         TestEqual(TEXT("Only committed landings and applied restores enter the journal"), FString::Join(Changes, TEXT(", ")),
             FString(bRestored ? TEXT("stateRestored 4") : TEXT("stateSaved 2, stateSaved 4")));
     };
-    auto CheckHistory = [this](int32 ExpectedTrips, const TCHAR* ExpectedEvent)
+    auto CheckHistory = [this](int32 ExpectedTrips, const TCHAR* ExpectedEvent, const TCHAR* Stage = TEXT("Delivered"))
     {
         const auto* Trace = FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>();
         int32 Trips = 0, Checkpoints = 0;
@@ -902,10 +917,10 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
             if (!(*Caller)->TryGetStringField(TEXT("script"), Script) || Script != TEXT("Examples/RoomDelivery.as")) return;
             FString Operation;
             if (Event.TryGetStringField(TEXT("operation"), Operation) && Operation == TEXT("Lift.MoveTo")) ++Trips;
-            if (Event.GetStringField(TEXT("type")) == ExpectedEvent && Event.GetStringField(TEXT("stage")) == TEXT("Delivered")) ++Checkpoints;
+            if (Event.GetStringField(TEXT("type")) == ExpectedEvent && Event.GetStringField(TEXT("stage")) == Stage) ++Checkpoints;
         });
         TestEqual(TEXT("Delivery MoveTo calls in this server session"), Trips, ExpectedTrips);
-        TestEqual(TEXT("Delivered checkpoint in this server session"), Checkpoints, 1);
+        TestEqual(*FString::Printf(TEXT("One %s event for %s"), ExpectedEvent, Stage), Checkpoints, 1);
     };
     if (!bReadOnly)
     {
@@ -914,10 +929,38 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
         {
             auto* Client = DeliveryPanel(Session->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch")) return false;
+            if (!AtFloor(FindPeer(NM_Client), 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 3, 3, 1)) return false;
             TestTrue(TEXT("Dispatch accepted"), DeliveryPanel(Session->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
             return true;
         });
-        Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory, CheckLanding, BothAtFloorFour]
+        if (bMidRide)
+        {
+            Steps(TEXT("shut down with both cabs between floor two and floor four"), [this, Session, CheckHistory]
+            {
+                auto* Host = FindPeer(NM_ListenServer);
+                auto* Panel = DeliveryPanel(Session->Host.Get());
+                if (Panel->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+                const double StartZ = Session->FloorFourLocation.Z - 400;
+                for (auto* World : {Host, FindPeer(NM_Client)})
+                {
+                    auto* Lift = FindLift(World, 2);
+                    if (!Lift || !TripOutput(Lift->Mission, TEXT("LastFloor"), 2)) return false;
+                    const double Z = Lift->GetActorLocation().Z;
+                    const double Progress = (Z - StartZ) / (Session->FloorFourLocation.Z - StartZ);
+                    if (Progress < 0.45 || Progress > 0.70) return false;
+                }
+                TestEqual(TEXT("No arrival before shutdown"), Session->Motion->GameplayEvents, 0);
+                const auto Info = Panel->InspectMission();
+                TestEqual(TEXT("Accepted dispatch already on disk"), Info.SavedStage, FString(TEXT("Dispatched")));
+                CheckHistory(1, TEXT("checkpointSaved"), TEXT("Dispatched"));
+                AddInfo(FString::Printf(TEXT("Stopping ride %s between floors: host Z=%.1f, client Z=%.1f, last landing Z=%.1f"),
+                    *Info.Operation.ToString(), FindLift(Host, 2)->GetActorLocation().Z,
+                    FindLift(FindPeer(NM_Client), 2)->GetActorLocation().Z, StartZ));
+                GEditor->RequestEndPlayMap();
+                return true;
+            });
+        }
+        else Steps(TEXT("completed ride saved before shutting down the host"), [this, Session, File, CheckHistory, CheckLanding, BothAtFloorFour]
         {
             auto* Client = DeliveryPanel(Session->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1) ||
@@ -933,28 +976,54 @@ bool FAngelIOCheckpointRestart::RunTest(const FString&)
     if (!bWriteOnly)
     {
         Start();
-        Steps(TEXT("new server restores Delivered and accepts confirmation"), [this, Session]
+        if (bMidRide)
         {
-            auto* Client = DeliveryPanel(Session->Client.Get());
-            if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
-            auto* Panel = DeliveryPanel(Session->Host.Get());
-            const auto Info = Panel->InspectMission();
-            TestEqual(TEXT("Restored stage on replacement server"), Info.RestoredStage, FString(TEXT("Delivered")));
-            if (Session->CheckpointId.IsValid()) TestEqual(TEXT("Checkpoint keeps its identity on disk"), Info.CheckpointId, Session->CheckpointId);
-            TestTrue(TEXT("Recreated mission can finish"), Panel->SendSignal(TEXT("Confirm"), 0));
-            return true;
-        });
-        Steps(TEXT("both peers see the restored fourth-floor cab without a startup or delivery ride"), [this, Session, CheckHistory, CheckLanding, BothAtFloorFour]
+            Steps(TEXT("mission retries from the saved landing without another dispatch"), [this, Session, CheckHistory, BothAtFloorFour]
+            {
+                auto* Host = FindPeer(NM_ListenServer);
+                auto* Client = DeliveryPanel(Session->Client.Get());
+                if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") ||
+                    !TripOutput(Client, TEXT("Stage"), 1) || !BothAtFloorFour(1)) return false;
+                const FVector FloorTwo = Session->FloorFourLocation - FVector(0, 0, 400);
+                if (!TestTrue(TEXT("Retry departed from the physical second floor"), Session->Motion->DepartureForFloorFour.IsSet() &&
+                    Session->Motion->DepartureForFloorFour->Equals(FloorTwo, 1.0))) return true;
+                TestEqual(TEXT("Exactly one arrival from the retried ride"), Session->Motion->GameplayEvents, 1);
+                const auto Info = DeliveryPanel(Session->Host.Get())->InspectMission();
+                TestEqual(TEXT("Mission resumed the accepted dispatch"), Info.RestoredStage, FString(TEXT("Dispatched")));
+                TestEqual(TEXT("Successful retry durably advanced the mission"), Info.SavedStage, FString(TEXT("Delivered")));
+                CheckHistory(1, TEXT("checkpointRestored"), TEXT("Dispatched"));
+                CheckHistory(1, TEXT("checkpointSaved"), TEXT("Delivered"));
+                AddInfo(FString::Printf(TEXT("Automatic retry: departure Z=%.1f, floor 4 host %s, client %s, one arrival"),
+                    Session->Motion->DepartureForFloorFour->Z,
+                    *FindLift(Host, 2)->GetActorLocation().ToString(), *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
+                return true;
+            });
+        }
+        else
         {
-            if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !BothAtFloorFour(0) ||
-                !AtFloor(FindPeer(NM_Client), 3, 3, 0)) return false;
-            AddInfo(FString::Printf(TEXT("Restored floor 4: host %s, client %s, zero completed trips on both peers"),
-                *FindLift(FindPeer(NM_ListenServer), 2)->GetActorLocation().ToString(),
-                *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
-            CheckHistory(0, TEXT("checkpointRestored"));
-            CheckLanding(true);
-            return true;
-        });
+            Steps(TEXT("new server restores Delivered and accepts confirmation"), [this, Session]
+            {
+                auto* Client = DeliveryPanel(Session->Client.Get());
+                if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
+                auto* Panel = DeliveryPanel(Session->Host.Get());
+                const auto Info = Panel->InspectMission();
+                TestEqual(TEXT("Restored stage on replacement server"), Info.RestoredStage, FString(TEXT("Delivered")));
+                if (Session->CheckpointId.IsValid()) TestEqual(TEXT("Checkpoint keeps its identity on disk"), Info.CheckpointId, Session->CheckpointId);
+                TestTrue(TEXT("Recreated mission can finish"), Panel->SendSignal(TEXT("Confirm"), 0));
+                return true;
+            });
+            Steps(TEXT("both peers see the restored fourth-floor cab without a startup or delivery ride"), [this, Session, CheckHistory, CheckLanding, BothAtFloorFour]
+            {
+                if (!TripOutput(DeliveryPanel(Session->Client.Get()), TEXT("Stage"), 2) || !BothAtFloorFour(0) ||
+                    !AtFloor(FindPeer(NM_Client), 3, 3, 0)) return false;
+                AddInfo(FString::Printf(TEXT("Restored floor 4: host %s, client %s, zero completed trips on both peers"),
+                    *FindLift(FindPeer(NM_ListenServer), 2)->GetActorLocation().ToString(),
+                    *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
+                CheckHistory(0, TEXT("checkpointRestored"));
+                CheckLanding(true);
+                return true;
+            });
+        }
         EndListenSession();
         ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, File]
         {
