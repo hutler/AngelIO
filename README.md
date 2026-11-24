@@ -54,12 +54,25 @@ Each `MoveTo` call returns its own trip handle. A script can start multiple trip
 | `TripStatus::Arrived` | The platform reached the requested floor. |
 | `TripStatus::Rejected` | The lift is busy, disabled, or unready, the floor is outside 1–8, or the speed is not a finite positive number. |
 | `TripStatus::Cancelled` | The lift was destroyed or its mission stopped during the ride. |
+| `TripStatus::TimedOut` | This reader's deadline expired while the ride was still pending. The lift continues moving. |
 
 `trip.Id` and `result.Id` return the same operation ID as a string. Use it to look up the ride in an exported trace.
+
+Use `trip.Wait(2.0f)` to wait up to two seconds of game time. The script can react to `TimedOut` and call `trip.Wait()` later on the same handle. Each wait retains its own result. `Wait(0)` polls immediately. If the ride has already finished when the VM checks, either overload returns its terminal result. Supply a finite, non-negative timeout.
 
 The playable version takes the floor and speed from the player's command. It publishes `LastStatus`, `LastFloor`, and `Completed` on `TripPanel` for the owning player. [Demo mission](Content/AngelIO/TypedLift.as)
 
 ## Address actors by name
+
+A successful `FindLift("FreightLift")` binds its handle to that particular actor. Renaming the endpoint changes subsequent lookups. The stored handle still calls the original lift. After its destruction, calling `MoveTo` on the stored handle yields `Cancelled` with trace reason `TargetGone`. Look up the name again to use a replacement.
+
+### Stream a room containing a lift
+
+A persistent mission can use the level's **On Level Shown** callback to send its component a signal, then call `FindLift` and check for `null`. Before the endpoint registers, the lookup returns `null` and group sends reach only current members. `trip.Wait(seconds)` starts after a ride has been created.
+
+When streaming removes the lift from play during a ride, the persistent caller receives `Cancelled` and the trace records `TargetUnloaded`. Its cached `Lift@` expires at that boundary. Showing the same room again requires a fresh lookup even if Unreal reuses the actor in memory. A mission attached to the streamed room itself ends with its component and starts from `Run` on re-entry when **Start On Begin Play** is enabled.
+
+The demo lift restores its starting position relative to the room when it re-enters play. An interrupted ride therefore keeps the building's floor heights aligned on the host and client.
 
 Set **Target Name** on an Angel IO Script Component in the Details panel. This logical name is independent of the actor's Outliner label. A shared name lets a mission send a signal to a group.
 
@@ -125,6 +138,12 @@ The server runs the missions and resolves named targets. Enable **Replicates** o
 
 In the demo, the player's controller sends the request to the server. `LiftFloor 4` and the Blueprint call `ServerRequestLiftFloor(4)` both reach the group through `LiftPanel.as`. The typed `LiftTrip` console command accepts floors 1–8 and speeds up to 2000 cm/s. Each game's module controls which commands and arguments players may send. [Demo controller](Source/AngelIOHost/AngelIOPlayerController.cpp)
 
+## Check a map before Play
+
+Open **Tools → Validate AngelIO Missions**. The Map Check log identifies the component, field, script and available source line for each problem. It checks mission files, initial input names and types, and names used directly in calls such as `FindLift("FreightLift")` and `SendTo("DemoLifts", ...)`. A typed lift lookup needs one matching lift actor. A group can contain multiple actors. A named endpoint with no script can receive events when **Start On Begin Play** is off.
+
+The editor checks the open map, including unsaved edits. MCP checks the saved package with `validate_map({"map":"/Game/Demo/TwoLifts"})`. Both inspect loaded level actors and missions on the default player controller. Targets spawned during play, unloaded streaming cells and names computed by scripts need a runtime check in PIE.
+
 ## Inspect a mission during PIE
 
 Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the demo with **Play As Listen Server**, two players and **Run Under One Process**. Wait for the initial rides to finish, then enter `LiftTrip 6 100` in the client's console.
@@ -179,13 +198,14 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `read_script` | Source text of the selected mission |
 | `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
 | `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
+| `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
 | `read_trace` | An exported operation history, optionally filtered by operation ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
 
 ## Validation and tests
 
-To generate the same JSON report from PowerShell or CI, run the commandlet from the project root. It returns `0` on success, `1` for an invalid script, or `2` for invalid arguments or a report write failure.
+To generate a JSON report from PowerShell or CI, run the commandlet from the project root. Select a script with `-Script=Elevator.as` or a map with `-Map=/Game/Demo/TwoLifts`. The commandlet returns `0` on success, `1` for a validation error and `2` for invalid arguments or a report write failure.
 
 ```powershell
 $editor = 'E:/DEV/UEBASE/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe'
@@ -198,6 +218,8 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | --- | --- |
 | `NamedGroupAndLateJoin` | Starts a host and client using the IP NetDriver, calls the lift group, and connects a second client after the ride to check the replicated state. |
 | `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
+| `HandleLifetimeAndTimeout` | Reassigns a name while a script holds the original lift. Checks a timed wait, eventual arrival, a client request to the replacement, replication and the stale handle's cancellation reason. |
+| `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.

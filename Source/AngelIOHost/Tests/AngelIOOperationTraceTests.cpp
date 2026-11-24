@@ -27,6 +27,7 @@ namespace
     struct FSharedActionAPI final : IAngelIOScriptAPI
     {
         TSharedPtr<FSharedAction> Action;
+        TSharedPtr<const EAngelIOWaitOutcome> TimedWait;
         static void Begin(asIScriptGeneric* Call)
         {
             static_cast<FSharedActionAPI*>(Call->GetAuxiliary())->Action = MakeShared<FSharedAction>();
@@ -34,12 +35,16 @@ namespace
         static void Wait(asIScriptGeneric* Call)
         {
             auto& API = *static_cast<FSharedActionAPI*>(Call->GetAuxiliary());
-            AngelIO::AwaitOperation(API.Action.ToSharedRef(), TEXT("SharedAction"));
+            if (Call->GetArgCount())
+                API.TimedWait = AngelIO::AwaitOperation(API.Action.ToSharedRef(), TEXT("SharedAction"), Call->GetArgFloat(0));
+            else
+                AngelIO::AwaitOperation(API.Action.ToSharedRef(), TEXT("SharedAction"));
         }
         bool RegisterBindings(asIScriptEngine& Engine) override
         {
             return Engine.RegisterGlobalFunction("void StartShared()", asFUNCTION(Begin), asCALL_GENERIC, this) >= 0 &&
-                Engine.RegisterGlobalFunction("void WaitShared()", asFUNCTION(Wait), asCALL_GENERIC, this) >= 0;
+                Engine.RegisterGlobalFunction("void WaitShared()", asFUNCTION(Wait), asCALL_GENERIC, this) >= 0 &&
+                Engine.RegisterGlobalFunction("void WaitShared(float)", asFUNCTION(Wait), asCALL_GENERIC, this) >= 0;
         }
     };
 }
@@ -66,6 +71,15 @@ bool FAngelIOSharedTrace::RunTest(const FString&)
     }
     if (!TestTrue(TEXT("Third script starts waiting"), Consumer.Compile(TEXT("consumer.as"),
         TEXT("void Run() { WaitShared(); }")) && Consumer.Start({}, World) && Consumer.IsWaitingOnOperation())) return false;
+    FAngelIOProgram Timed;
+    if (!TestTrue(TEXT("Fourth VM waits for the same operation"), Timed.Compile(TEXT("timed.as"),
+        TEXT("void Run() { WaitShared(0.02f); }")) && Timed.Start({}, World) && Timed.IsWaitingOnOperation())) return false;
+    TestFalse(TEXT("Deadline is in the future"), Timed.ResumeCompletedOperation());
+    Scene.TickTestWorld(0.05f);
+    TestTrue(TEXT("Only the timed VM resumes"), Timed.ResumeCompletedOperation() &&
+        Timed.State() == EAngelIOState::Finished && *API.TimedWait == EAngelIOWaitOutcome::TimedOut);
+    TestFalse(TEXT("Timeout leaves shared operation pending"), API.Action->IsComplete());
+    TestFalse(TEXT("Other VM keeps waiting"), Consumer.ResumeCompletedOperation());
     API.Action->Finish();
     API.Action->Finish();
     TestTrue(TEXT("Remaining waiter resumes"), Consumer.ResumeCompletedOperation());
@@ -82,6 +96,8 @@ bool FAngelIOSharedTrace::RunTest(const FString&)
         TestEqual(TEXT("Common ID"), Event->GetStringField(TEXT("operationId")),
             API.Action->GetOperationId().ToString(EGuidFormats::DigitsWithHyphensLower));
         FString Type = Event->GetStringField(TEXT("type"));
+        if (Type == TEXT("resume") && Event->GetObjectField(TEXT("waiter"))->GetStringField(TEXT("script")) == TEXT("timed.as"))
+            TestEqual(TEXT("Resume records waiter outcome"), Event->GetStringField(TEXT("outcome")), FString(TEXT("TimedOut")));
         if (Type != TEXT("complete"))
         {
             const auto Site = Event->GetObjectField(Type == TEXT("call") ? TEXT("caller") : TEXT("waiter"));
@@ -90,7 +106,18 @@ bool FAngelIOSharedTrace::RunTest(const FString&)
         Timeline.Add(Type);
     }
     TestEqual(TEXT("Independent waiters, one completion"), FString::Join(Timeline, TEXT(" ")),
-        FString(TEXT("call/producer.as wait/stopped.as detach/stopped.as wait/consumer.as complete resume/consumer.as")));
+        FString(TEXT("call/producer.as wait/stopped.as detach/stopped.as wait/consumer.as wait/timed.as resume/timed.as complete resume/consumer.as")));
+    FAngelIOProgram Tie;
+    if (!TestTrue(TEXT("Start a fresh finite wait"), Tie.Compile(TEXT("tie.as"),
+        TEXT("void Run() { StartShared(); WaitShared(0.02f); }")) && Tie.Start({}, World))) return false;
+    Scene.TickTestWorld(0.05f);
+    API.Action->Finish();
+    TestTrue(TEXT("Completion wins if observed on the same update as the expired deadline"),
+        Tie.ResumeCompletedOperation() && *API.TimedWait == EAngelIOWaitOutcome::Completed);
+    FAngelIOProgram Invalid;
+    TestTrue(TEXT("Negative timeout reports script error"), Invalid.Compile(TEXT("invalid.as"),
+        TEXT("void Run() { WaitShared(-1); }")) && !Invalid.Start({}, World) &&
+        Invalid.Diagnostics().ContainsByPredicate([](const auto& D) { return D.Message.Contains(TEXT("non-negative")); }));
     return true;
 }
 

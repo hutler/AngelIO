@@ -120,17 +120,17 @@ server.registerTool("describe_api", {
   });
 });
 
-async function validate(relative) {
+async function validate(selector = "-ApiOnly") {
   const dir = await mkdtemp(path.join(tmpdir(), "angelio-check-"));
   try {
     const report = path.join(dir, "report.json");
     try {
-      await exec(editor, [project, "-run=AngelIOCheck", relative ? "-Script=" + relative : "-ApiOnly", "-Report=" + report,
+      await exec(editor, [project, "-run=AngelIOCheck", selector, "-Report=" + report,
         "-unattended", "-nullrhi", "-nosound", "-nop4", "-nosplash", "-ddc=InstalledNoZenLocalFallback",
         "-abslog=" + path.join(dir, "check.log")],
         { timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
     } catch (error) {
-      // Invalid scripts deliberately return 1 and provide compiler diagnostics in the report.
+      // Validation errors return 1 with structured diagnostics.
       if (error.code !== 1) throw new Error("Unreal validator failed: " + (error.code ?? error.message));
     }
     try { return JSON.parse(await readFile(report, "utf8")); }
@@ -145,7 +145,13 @@ server.registerTool("validate_script", {
   inputSchema, annotations
 }, async ({ script }) => {
   const { relative } = await scriptPath(script);
-  return result(await validate(relative));
+  return result(await validate("-Script=" + relative));
 });
+
+server.registerTool("validate_map", {
+  description: "Check missions on loaded actors and default player-controller components in a saved map. Reports script, initial input and literal named-target diagnostics without starting PIE.",
+  inputSchema: { map: z.string().regex(/^\/Game\/(?:[\p{L}\p{N}_-]+\/)*[\p{L}\p{N}_-]+$/u)
+    .describe("Saved map package, e.g. /Game/Demo/TwoLifts") }, annotations
+}, async ({ map }) => result(await validate("-Map=" + map)));
 
 await server.connect(new StdioServerTransport());

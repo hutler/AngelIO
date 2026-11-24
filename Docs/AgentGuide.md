@@ -52,7 +52,7 @@ Set `InitialInputs` before `StartScript` to override defaults. At runtime, call 
 
 Set the logical `TargetName` on the component. Renaming the actor in the Outliner changes its label. To change its address during play, call `SetTargetName`. Registration follows `BeginPlay` and `EndPlay` on authority. Target names use Unreal's case-insensitive `FName` semantics. The map uses both forms of addressing below. [World registry](../Plugins/AngelIO/Source/AngelIO/Private/AngelIOTargetRegistry.cpp) · [Demo lookup](../Source/AngelIOHost/AngelIOHost.cpp)
 
-- **One actor.** The `Address` components identify `FreightLift` and `ServiceLiftB`. `FindLift` returns a handle when exactly one distinct lift actor matches in the calling mission's world. Check for `null` before `MoveTo`.
+- **One actor.** The `Address` components identify `FreightLift` and `ServiceLiftB`. `FindLift` returns a handle when exactly one distinct lift actor matches in the calling mission's world. Check for `null` before `MoveTo`. A cached handle still addresses that actor after a rename. Resolve again to address an actor that takes over its name.
 - **A group.** Both lifts' `Mission` components have `TargetName = DemoLifts`. `SendTo` delivers to the matching components. Use this for a broadcast such as a floor request. Use a typed trip handle when the caller needs a particular ride's result.
 
 ## Typed operations
@@ -63,9 +63,13 @@ The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftT
 2. Register the script types, reference-count behaviors, enum values, functions, and methods. Return failure if a registration fails. The lift provider uses a weak actor reference for the target and a shared reference for the trip. A script can keep a result after the actor disappears. Obtain the executing world with `AngelIO::GetScriptWorld()` inside a binding.
 3. Create a new `FAngelIOOperation` for every invocation, including a rejected request. Pass the world, operation name, logical target, JSON arguments, and optionally the executing component or actor as `TraceTarget`. In the demo the target string is `FreightLift` and the object is its `Mission` component. That object lets the inspector associate a request with the exact executor even when names are shared or changed.
 4. Have the producer retain the pending operation. Save the domain result before calling `MarkComplete(Status, Reason)` on the game thread. Cover early rejection, synchronous completion, normal arrival and target teardown. A stale lift handle yields `Cancelled` with `TargetGone`. Destroying a moving lift yields `Cancelled` with `TargetEndPlay`. [Trip result](../Source/AngelIOHost/AngelIOLiftTrip.cpp) · [Producer lifecycle](../Source/AngelIOHost/AngelIOExampleLift.cpp)
-5. Implement the script's wait method with `AngelIO::AwaitOperation` on the same operation object. The demo sets the return handle before the call. A completed operation returns inline. A pending wait suspends and the component resumes it on a tick after completion. Stopping a waiter detaches that script. The producer and other waiters keep their references. [Independent waiters and trace retention tests](../Source/AngelIOHost/Tests/AngelIOOperationTraceTests.cpp)
+5. Implement the script's wait method with `AngelIO::AwaitOperation` on the same operation object. The timeout overload accepts an optional duration in game seconds and returns a shared outcome for this wait. Keep it in the script result handle. A completed operation returns inline, zero polls, and a positive deadline resumes on the first eligible game tick. Completion wins if both are observed on that tick. A timed-out `TripResult.Status` stays `TimedOut` after another reader gets `Arrived`. Stopping a waiter detaches that script. The producer and other waiters keep their references. [Independent waiters and trace retention tests](../Source/AngelIOHost/Tests/AngelIOOperationTraceTests.cpp)
 
 Rebuild the editor after changing a binding. Check the new signature in `describe_api.externalDeclarations`, compile a small caller, then exercise the behavior. The demo result exposes `Id`, `Floor` and `Status`. Reasons such as `LiftBusy` appear in the trace's `complete` event. Use `trip.Id` or `result.Id` to correlate the outcome with the native operation's `GetOperationId()`. Two invocations on the same actor and floor still have distinct IDs.
+
+### Streamed targets
+
+In the demo provider each typed lift handle captures the actor's play generation. The lift increments it in `EndPlay`. When a streamed level becomes hidden, a weak object pointer can still resolve, and Unreal can call `BeginPlay` again on the same actor. Compare the generation before dispatching a cached call. Treat `TargetUnloaded` as the terminal reason for the ride interrupted by level removal and `TargetGone` as the reason for a later call using an expired handle. If the caller lives in the streamed level too, its VM detaches on removal. A persistent caller can await a signal from the streaming controller, then resolve the endpoint again. [Listen-server streaming regression](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
 
 ## Listen-server investigation
 
@@ -80,7 +84,7 @@ Run **Play As Listen Server** with **2 players** and **Run Under One Process** o
 
 ## MCP tool reference
 
-From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server whose command is `node` and whose arguments are the absolute path to `Tools/MCP/server.mjs`, `--project`, the absolute `.uproject` path, `--editor`, and the absolute `UnrealEditor-Cmd.exe` path. `describe_api` and `validate_script` launch the built editor commandlet, so allow time for startup. The reference client allows 150 seconds per call. [Client configuration example](../README.md#mcp-tools-for-editors-and-agents) · [Server schemas](../Tools/MCP/server.mjs)
+From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server whose command is `node` and whose arguments are the absolute path to `Tools/MCP/server.mjs`, `--project`, the absolute `.uproject` path, `--editor`, and the absolute `UnrealEditor-Cmd.exe` path. `describe_api`, `validate_script` and `validate_map` launch the built editor commandlet, so allow time for startup. The reference client allows 150 seconds per call. [Client configuration example](../README.md#mcp-tools-for-editors-and-agents) · [Server schemas](../Tools/MCP/server.mjs)
 
 | Tool | Arguments | Read from `structuredContent` |
 | --- | --- | --- |
@@ -88,9 +92,12 @@ From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server
 | `read_script` | `{"script":"TypedLift.as"}` | Normalized `script` and UTF-8 `source` |
 | `describe_api` | `{}` | `entry`, `portTypes`, `calls`, `externalDeclarations` and delivery rules for this project |
 | `validate_script` | `{"script":"TypedLift.as"}` | `valid`, `ports` with name/type/direction, `inputSignals`, `outputSignals`, `externalDeclarations`, `diagnostics` |
+| `validate_map` | `{"map":"/Game/Demo/TwoLifts"}` | `map`, `valid`, `missionsChecked`, and diagnostics with `code`, `severity`, `message`, `actor`, `component`, `script`, `field`, `line`, `column` |
 | `read_trace` | Optional fields are `trace` (export basename), `operationId` (hyphenated GUID), `afterSequence` (exclusive, default 0), `limit` (1–200, default 50) | `trace`, `schemaVersion`, `sessionId`, `world`, `netMode`, `droppedEvents`, `events`, `nextAfterSequence` |
 
 **Editing loop.** Call `list_scripts`, `describe_api`, and `read_script`. Edit the file with the workspace editor, then send its relative path to `validate_script`. A compiler error is a successful tool response with `valid: false`. Read each diagnostic's `severity`, `message`, `line` and `column`. A path or tool execution error sets `isError`. A valid report confirms compilation and public declarations. Use PIE for actor lookup, movement, replication and completion.
+
+**Map checks.** Use **Tools → Validate AngelIO Missions** for the current editor world, or `validate_map` for a saved package. Each distinct script compiles once per check. `input_unknown` and `input_type` identify the component's initial override. `target_missing` and `target_ambiguous` identify a direct literal lookup and its source line. Providers can register global lookup names, actor types and the required cardinality through `GetMapLookups`. Use a unique global function name for each addressing rule. The static check recognizes unqualified calls with a plain double-quoted first argument. Escaped strings, expressions and names shadowed by a script function or method are skipped. The validator examines loaded placed actors and the configured player controller's mission templates. Exercise computed names and streamed or spawned targets in PIE.
 
 **Trace lookup.** Call `read_trace` with `{}` for the latest snapshot, or pass the basename from the host log. Preserve the returned `trace` for every subsequent call. Find the `call` with the desired `operation`, `target`, `arguments` and `caller`. Pass its `operationId` and the same `trace` to read the ride. If `nextAfterSequence` is a number, pass it as `afterSequence` with the same filters and repeat until it is `null`. The filename pins the snapshot even when another PIE world exports during paging.
 
@@ -98,6 +105,7 @@ From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server
 | --- | --- |
 | `call → wait → complete → resume` | The waiter suspended. It resumed after the producer stored the result. |
 | `call → complete → wait` with `suspended: false` | The result was ready when read. Inspect `status` and `reason` for arrival or rejection. |
+| `wait → resume` with `outcome: TimedOut` | The reader's game-time deadline expired. Look for the producer's `complete` separately. A zero-time poll puts `outcome` directly on the `wait` event. |
 | `wait → detach` | This waiting VM was released. Other waiters and the operation can still finish. |
 
 Check `netMode` and `sessionId` before comparing histories. The world keeps the latest 4,096 events. A positive `droppedEvents` means the captured prefix is missing. A snapshot taken during motion can end at `wait`. Export again after the observed completion to inspect later events. MCP reads snapshots from disk. The live PIE view is in the editor tab. [Trace storage and export](../Plugins/AngelIO/Source/AngelIO/Private/AngelIOTraceSubsystem.cpp)
@@ -138,7 +146,7 @@ if ($validatorExit -ne 0 -or !$contract.valid) { throw "Validation failed. See $
 $contract.ports
 ```
 
-**Run Unreal Automation.** The full filter below currently covers nine tests. For a focused run change `$filter` to one of the narrower filters in the table. Confirm that the intended test names appear with `Result={Success}` in the log.
+**Run Unreal Automation.** The full filter below covers the tests in the table below. For a focused run change `$filter` to one of the narrower filters in the table. Confirm that the intended test names appear with `Result={Success}` in the log.
 
 ```powershell
 $filter = 'AngelIO.'
@@ -157,11 +165,12 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | --- | --- |
 | `AngelIO.Compiler.Contract` | Compilation, public contract, diagnostics and runtime failure cases |
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
+| `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
 | `AngelIO.Missions.` | Independent lift instances and overlapping typed operations |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector` using networked PIE |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips` using networked PIE |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
-**Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)
+**Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts and maps. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. Pass `--timeout-trace <basename>` from `HandleLifetimeAndTimeout` to verify the poll, expired wait and final arrival for one operation ID. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)
 
 ```powershell
 npm ci --prefix Tools/MCP

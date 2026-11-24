@@ -53,6 +53,15 @@ struct FAngelIOEvent
 enum class EAngelIOState { Empty, Compiled, Running, Waiting, Finished, Failed };
 
 #if WITH_EDITOR
+struct FAngelIOLiteralTarget
+{
+    FString Function;
+    FString Name;
+    UClass* OwnerClass;
+    bool bRequireSingleActor;
+    int32 Line;
+};
+
 struct FAngelIOMissionInspection
 {
     EAngelIOState State = EAngelIOState::Empty;
@@ -89,6 +98,7 @@ public:
     FString WaitingFor() const;
 #if WITH_EDITOR
     FAngelIOMissionInspection InspectMission() const;
+    const TArray<FAngelIOLiteralTarget>& LiteralTargets() const;
 #endif
 
 private:

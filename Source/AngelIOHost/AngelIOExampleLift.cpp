@@ -3,6 +3,8 @@
 #include "AngelIOScriptComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/LevelStreaming.h"
+#include "LevelUtils.h"
 #include "UObject/ConstructorHelpers.h"
 
 AAngelIOExampleLift::AAngelIOExampleLift()
@@ -27,6 +29,17 @@ AAngelIOExampleLift::AAngelIOExampleLift()
 
 void AAngelIOExampleLift::BeginPlay()
 {
+    // The mission restarts at its configured floor on every level activation.
+    if (HasAuthority() && GetNetMode() != NM_Client)
+    {
+        if (const auto* Stream = FLevelUtils::FindStreamingLevel(GetLevel()))
+        {
+            if (StartPositionInLevel.IsSet())
+                SetActorLocation(Stream->LevelTransform.TransformPosition(*StartPositionInLevel), false, nullptr, ETeleportType::TeleportPhysics);
+            else
+                StartPositionInLevel = Stream->LevelTransform.InverseTransformPosition(GetActorLocation());
+        }
+    }
     Mission->OnSignal.AddDynamic(this, &AAngelIOExampleLift::HandleSignal);
     Mission->OnPublicStateChanged.AddDynamic(this, &AAngelIOExampleLift::CheckMotionState);
     Super::BeginPlay();
@@ -79,7 +92,13 @@ TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed
 
 void AAngelIOExampleLift::EndPlay(const EEndPlayReason::Type Reason)
 {
-    if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled, TEXT("TargetEndPlay"));
+    // Streaming can start this same UObject again before garbage collection.
+    ++PlayGeneration;
+    Mission->OnSignal.RemoveDynamic(this, &AAngelIOExampleLift::HandleSignal);
+    Mission->OnPublicStateChanged.RemoveDynamic(this, &AAngelIOExampleLift::CheckMotionState);
+    SetActorTickEnabled(false);
+    if (ActiveTrip) ActiveTrip->Finish(ELiftTripStatus::Cancelled,
+        Reason == EEndPlayReason::RemovedFromWorld ? TEXT("TargetUnloaded") : TEXT("TargetEndPlay"));
     ActiveTrip.Reset();
     Super::EndPlay(Reason);
 }

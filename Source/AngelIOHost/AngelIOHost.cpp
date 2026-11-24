@@ -40,9 +40,17 @@ namespace
     {
         TWeakObjectPtr<AAngelIOExampleLift> Actor;
         FName Target;
+        uint64 PlayGeneration;
     };
     using FLiftHandle = TScriptHandle<FNamedLift>;
-    using FTripHandle = TScriptHandle<TSharedRef<FLiftTrip>>;
+    // Script TripStatus values 0..2 are producer results. Value 3 belongs to the waiter.
+    constexpr asDWORD TimedOutResult = 3;
+    struct FTripReference
+    {
+        TSharedRef<FLiftTrip> Trip;
+        TSharedPtr<const EAngelIOWaitOutcome> Wait;
+    };
+    using FTripHandle = TScriptHandle<FTripReference>;
 
     void FindNamedLift(asIScriptGeneric* Call)
     {
@@ -60,43 +68,48 @@ namespace
                 Match = Lift;
             }
         }
-        Call->SetReturnAddress(Match ? new FLiftHandle({Match, FName(UTF8_TO_TCHAR(Name.c_str()))}) : nullptr);
+        Call->SetReturnAddress(Match ? new FLiftHandle({Match, FName(UTF8_TO_TCHAR(Name.c_str())), Match->GetPlayGeneration()}) : nullptr);
     }
 
     void MoveLift(asIScriptGeneric* Call)
     {
         const auto& Handle = static_cast<FLiftHandle*>(Call->GetObject())->Value;
         auto* Lift = Handle.Actor.Get();
+        if (Lift && Lift->GetPlayGeneration() != Handle.PlayGeneration) Lift = nullptr;
         const int32 Floor = static_cast<int32>(Call->GetArgDWord(0));
         const float Speed = Call->GetArgFloat(1);
         auto Trip = Lift ? Lift->MoveTo(Floor, Speed, Handle.Target) :
             MakeShared<FLiftTrip>(AngelIO::GetScriptWorld(), Handle.Target.ToString(), Floor, Speed);
         if (!Lift) Trip->Finish(ELiftTripStatus::Cancelled, TEXT("TargetGone"));
-        Call->SetReturnAddress(new FTripHandle(Trip));
+        Call->SetReturnAddress(new FTripHandle({Trip, nullptr}));
     }
 
     void WaitForTrip(asIScriptGeneric* Call)
     {
-        auto Trip = static_cast<FTripHandle*>(Call->GetObject())->Value;
-        Call->SetReturnAddress(new FTripHandle(Trip));
-        AngelIO::AwaitOperation(Trip, TEXT("LiftTrip.Wait"));
+        auto Trip = static_cast<FTripHandle*>(Call->GetObject())->Value.Trip;
+        TOptional<double> Timeout;
+        if (Call->GetArgCount()) Timeout = Call->GetArgFloat(0);
+        auto Wait = AngelIO::AwaitOperation(Trip, TEXT("LiftTrip.Wait"), Timeout);
+        Call->SetReturnAddress(new FTripHandle({Trip, Wait}));
     }
 
     void TripStatus(asIScriptGeneric* Call)
     {
-        Call->SetReturnDWord(static_cast<asDWORD>(static_cast<FTripHandle*>(Call->GetObject())->Value->Status));
+        const auto& Result = static_cast<FTripHandle*>(Call->GetObject())->Value;
+        Call->SetReturnDWord(*Result.Wait == EAngelIOWaitOutcome::TimedOut ?
+            TimedOutResult : static_cast<asDWORD>(Result.Trip->Status));
     }
 
     void TripId(asIScriptGeneric* Call)
     {
-        const auto& Id = static_cast<FTripHandle*>(Call->GetObject())->Value->GetOperationId();
+        const auto& Id = static_cast<FTripHandle*>(Call->GetObject())->Value.Trip->GetOperationId();
         const FString String = Id.ToString(EGuidFormats::DigitsWithHyphensLower);
         new (Call->GetAddressOfReturnLocation()) std::string(TCHAR_TO_UTF8(*String));
     }
 
     void TripFloor(asIScriptGeneric* Call)
     {
-        Call->SetReturnDWord(static_cast<FTripHandle*>(Call->GetObject())->Value->Floor);
+        Call->SetReturnDWord(static_cast<FTripHandle*>(Call->GetObject())->Value.Trip->Floor);
     }
 }
 
@@ -106,6 +119,12 @@ public:
     void StartupModule() override { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
     void ShutdownModule() override { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
     bool SupportsDynamicReloading() override { return false; }
+#if WITH_EDITOR
+    void GetMapLookups(TArray<FAngelIOMapLookup>& Out) const override
+    {
+        Out.Add({TEXT("FindLift"), AAngelIOExampleLift::StaticClass(), true});
+    }
+#endif
 
     bool RegisterBindings(asIScriptEngine& Engine) override
     {
@@ -114,9 +133,11 @@ public:
             Engine.RegisterEnumValue("TripStatus", "Arrived", int(ELiftTripStatus::Arrived)) >= 0 &&
             Engine.RegisterEnumValue("TripStatus", "Rejected", int(ELiftTripStatus::Rejected)) >= 0 &&
             Engine.RegisterEnumValue("TripStatus", "Cancelled", int(ELiftTripStatus::Cancelled)) >= 0 &&
+            Engine.RegisterEnumValue("TripStatus", "TimedOut", TimedOutResult) >= 0 &&
             Engine.RegisterGlobalFunction("Lift@ FindLift(const string &in name)", asFUNCTION(FindNamedLift), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("Lift", "LiftTrip@ MoveTo(int floor, float speed)", asFUNCTION(MoveLift), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "TripResult@ Wait() const", asFUNCTION(WaitForTrip), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("LiftTrip", "TripResult@ Wait(float timeoutSeconds) const", asFUNCTION(WaitForTrip), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("TripResult", "TripStatus get_Status() const property", asFUNCTION(TripStatus), asCALL_GENERIC) >= 0 &&

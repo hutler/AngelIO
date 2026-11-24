@@ -159,6 +159,8 @@ namespace
         }
         else if (Type == TEXT("complete"))
             Detail = (Field(Event, TEXT("status")) + TEXT("  ") + Field(Event, TEXT("reason"))).TrimEnd();
+        else if (Field(Event, TEXT("outcome")) == TEXT("TimedOut"))
+            Detail = TEXT("Waiter timed out");
         else if (Type == TEXT("wait"))
             Detail = Event.GetBoolField(TEXT("suspended")) ? TEXT("Suspended") : TEXT("Already complete");
         const auto* Source = Site(Event, Type == TEXT("call") ? TEXT("caller") : TEXT("waiter"));
@@ -404,7 +406,7 @@ void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority
             Op->Status = Field(Event, TEXT("status"));
             Op->bOpen = false;
         }
-        else if (Op->Status.IsEmpty() && (Type == TEXT("resume") ||
+        else if (Op->Status.IsEmpty() && Field(Event, TEXT("outcome")) != TEXT("TimedOut") && (Type == TEXT("resume") ||
             (Type == TEXT("wait") && !Event.GetBoolField(TEXT("suspended")))))
             Op->Status = TEXT("Completed");
         Op->LastSequence = static_cast<int64>(Event.GetNumberField(TEXT("sequence")));

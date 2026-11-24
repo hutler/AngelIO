@@ -6,6 +6,6 @@ public class AngelIOEditor : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "SlateCore", "AngelIO" });
-        PrivateDependencyModuleNames.AddRange(new[] { "Engine", "Json", "UnrealEd", "Slate", "Sockets", "WorkspaceMenuStructure" });
+        PrivateDependencyModuleNames.AddRange(new[] { "Engine", "EngineSettings", "Json", "UnrealEd", "Slate", "Sockets", "ToolMenus", "WorkspaceMenuStructure" });
     }
 }

@@ -13,6 +13,7 @@
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
+#include "Engine/LevelStreamingDynamic.h"
 #include "EngineUtils.h"
 #include "Settings/LevelEditorPlaySettings.h"
 #include "Misc/AutomationTest.h"
@@ -61,7 +62,7 @@ struct FListenPeers
     TStrongObjectPtr<UAngelIOTestSignalObserver> HostProbe{NewObject<UAngelIOTestSignalObserver>()};
     TStrongObjectPtr<UAngelIOTestSignalObserver> ClientProbe{NewObject<UAngelIOTestSignalObserver>()};
 };
-void StartListenSession()
+void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"))
 {
     auto* Settings = NewObject<ULevelEditorPlaySettings>();
     Settings->SetPlayNetMode(EPlayNetMode::PIE_ListenServer);
@@ -71,7 +72,7 @@ void StartListenSession()
     Settings->GameGetsMouseControl = false;
     FRequestPlaySessionParams Params;
     Params.EditorPlaySettings = Settings;
-    Params.GlobalMapOverride = TEXT("/Game/Demo/TwoLifts");
+    Params.GlobalMapOverride = Map;
     Params.bAllowOnlineSubsystem = false;
     GEditor->RequestPlaySession(Params);
 }
@@ -180,6 +181,231 @@ bool FAngelIOListen::RunTest(const FString&)
             if (!Lift || Lift->Mission->GetOutput(TEXT("LastFloor"), Value) ||
                 !Lift->Mission->GetWaitingSignal().IsEmpty()) return false;
         }
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOHandleLifetime, "AngelIO.Network.ListenServer.HandleLifetimeAndTimeout",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOHandleLifetime::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession();
+    const auto Steps = ListenSteps(this);
+    const auto Probe = MakeShared<FAngelIOProgram>();
+    Steps(TEXT("cache the original actor and reassign its name"), [this, Probe]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(Client, 3, 3, 1)) return false;
+        auto* PC = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || !PC->GetNetConnection()) return false;
+        const TCHAR* Script = TEXT(R"(
+            enum InputSignal { Rebound, Destroyed }
+            bool out_Timed;
+            bool out_Arrived;
+            bool out_Gone;
+            void Run() {
+                Lift@ cached = FindLift("FreightLift");
+                WaitFor(InputSignal::Rebound);
+                LiftTrip@ ride = cached.MoveTo(4, 200);
+                TripResult@ poll = ride.Wait(0);
+                TripResult@ timed = ride.Wait(0.05f);
+                out_Timed = poll.Status == TripStatus::TimedOut && timed.Status == TripStatus::TimedOut;
+                TripResult@ arrival = ride.Wait();
+                out_Arrived = arrival.Status == TripStatus::Arrived && ride.Wait(0).Status == TripStatus::Arrived
+                    && timed.Status == TripStatus::TimedOut && timed.Id == arrival.Id;
+                WaitFor(InputSignal::Destroyed);
+                out_Gone = cached.MoveTo(8, 200).Wait().Status == TripStatus::Cancelled;
+            })");
+        if (!TestTrue(TEXT("Cache handle before rename"), Probe->Compile(TEXT("CachedLift.as"), Script) &&
+                Probe->Start({}, Host) && Probe->WaitingFor() == TEXT("Rebound"))) return true;
+        FindLift(Host, 2)->Address->SetTargetName(TEXT("OriginalLift"));
+        FindLift(Host, 3)->Address->SetTargetName(TEXT("FreightLift"));
+        TestTrue(TEXT("Cached handle starts old lift"), Probe->Signal(TEXT("Rebound"), 0) && Probe->IsWaitingOnOperation());
+        PC->LiftTrip(5, 400);
+        return true;
+    });
+    Steps(TEXT("timeout resumes the reader before arrival"), [this, Probe]
+    {
+        if (!Probe->ResumeCompletedOperation()) return false;
+        FAngelIOValue Timed;
+        TestTrue(TEXT("Polling and finite wait timed out, indefinite wait remains active"),
+            Probe->GetOutput(TEXT("Timed"), Timed) && Timed.Boolean && Probe->IsWaitingOnOperation());
+        return true;
+    });
+    Steps(TEXT("host and client see separate rides on old and newly resolved actors"), [this, Probe]
+    {
+        Probe->ResumeCompletedOperation();
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (Probe->WaitingFor() != TEXT("Destroyed") || !AtFloor(Host, 2, 4, 2) ||
+            !AtFloor(Client, 2, 4, 2) || !AtFloor(Host, 3, 5, 2) || !AtFloor(Client, 3, 5, 2)) return false;
+        FAngelIOValue Arrived;
+        TestTrue(TEXT("Timed-out result is stable after the same ride arrives"),
+            Probe->GetOutput(TEXT("Arrived"), Arrived) && Arrived.Boolean);
+        FindLift(Host, 2)->Destroy();
+        return true;
+    });
+    Steps(TEXT("a destroyed handle reports TargetGone"), [this, Probe]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client || FindLift(Client, 2)) return false;
+        FAngelIOValue Gone;
+        TestTrue(TEXT("Cached handle reports cancellation"), Probe->Signal(TEXT("Destroyed"), 0) &&
+            Probe->GetOutput(TEXT("Gone"), Gone) && Gone.Boolean);
+        bool bTargetGone = false;
+        Host->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
+        {
+            FString Reason;
+            if (Event.TryGetStringField(TEXT("reason"), Reason) && Reason == TEXT("TargetGone"))
+                bTargetGone = Event.GetStringField(TEXT("status")) == TEXT("Cancelled");
+        });
+        TestTrue(TEXT("Trace explains stale call"), bTargetGone);
+        TestTrue(TEXT("Replacement still on client-requested floor"), AtFloor(Host, 3, 5, 2));
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOStreamedTrips, "AngelIO.Network.ListenServer.StreamedTrips",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOStreamedTrips::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession(TEXT("/Engine/Maps/Entry"));
+    struct FRoom
+    {
+        TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
+        TWeakObjectPtr<AAngelIOExampleLift> Original;
+        FVector FloorTwoLocation = FVector::ZeroVector;
+        FAngelIOProgram Caller;
+        bool Output(const TCHAR* Name) const
+        {
+            FAngelIOValue V;
+            return Caller.GetOutput(Name, V) && V.Boolean;
+        }
+    };
+    const auto Room = MakeShared<FRoom>();
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("persistent caller starts before the room streams in"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
+        const TCHAR* Source = TEXT(R"(
+            enum InputSignal { Loaded, Hidden, Shown, Reloaded }
+            bool out_Absent, out_Cancelled, out_Hidden, out_Stale, out_New, out_Arrived;
+            void Run() {
+                out_Absent = FindLift("FreightLift") is null;
+                WaitFor(InputSignal::Loaded);
+                Lift@ old = FindLift("FreightLift");
+                out_Cancelled = old.MoveTo(8, 10).Wait().Status == TripStatus::Cancelled;
+                WaitFor(InputSignal::Hidden);
+                out_Hidden = FindLift("FreightLift") is null &&
+                    old.MoveTo(8, 100).Wait().Status == TripStatus::Cancelled;
+                WaitFor(InputSignal::Shown);
+                out_Stale = old.MoveTo(8, 100).Wait().Status == TripStatus::Cancelled;
+                Lift@ shown = FindLift("FreightLift");
+                out_New = shown.MoveTo(2, 800).Wait().Status == TripStatus::Arrived;
+                WaitFor(InputSignal::Reloaded);
+                out_Arrived = shown.MoveTo(8, 100).Wait().Status == TripStatus::Cancelled &&
+                    FindLift("FreightLift").MoveTo(6, 800).Wait().Status == TripStatus::Arrived;
+            })");
+        if (!TestTrue(TEXT("Lookup is empty before loading"), Room->Caller.Compile(TEXT("StreamedLift.as"), Source) &&
+            Room->Caller.Start({}, Host) && Room->Output(TEXT("Absent")))) return true;
+        auto Load = [](UWorld* World)
+        {
+            bool bSuccess = false;
+            return ULevelStreamingDynamic::LoadLevelInstance(World, TEXT("/Game/Demo/TwoLifts"),
+                FVector(1200, -1600, 300), FRotator::ZeroRotator, bSuccess, TEXT("AngelIOStreamedRoom"));
+        };
+        Room->Host = Load(Host);
+        Room->Client = Load(Client);
+        TestTrue(TEXT("Dynamic room requested on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
+        return true;
+    });
+    Steps(TEXT("hide room during an active ride"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+        Room->Original = FindLift(Host, 2);
+        Room->FloorTwoLocation = Room->Original->GetActorLocation();
+        TestTrue(TEXT("Persistent caller is awaiting the ride"), Room->Caller.Signal(TEXT("Loaded"), 0) &&
+            Room->Caller.IsWaitingOnOperation());
+        Room->Host->SetShouldBeVisible(false);
+        Room->Client->SetShouldBeVisible(false);
+        return true;
+    });
+    Steps(TEXT("hidden actors leave the registry and the ride is cancelled"), [this, Room]
+    {
+        if (Room->Host->IsLevelVisible() || Room->Client->IsLevelVisible()) return false;
+        Room->Caller.ResumeCompletedOperation();
+        TestTrue(TEXT("Caller observes both cancellation and absence"), Room->Output(TEXT("Cancelled")) &&
+            Room->Caller.Signal(TEXT("Hidden"), 0) && Room->Output(TEXT("Hidden")));
+        Room->Host->SetShouldBeVisible(true);
+        Room->Client->SetShouldBeVisible(true);
+        return true;
+    });
+    Steps(TEXT("a new lifetime on the same UObject requires a fresh handle"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+        TestTrue(TEXT("Unreal reused the hidden actor"), Room->Original.IsValid() && Room->Original.Get() == FindLift(Host, 2));
+        TestTrue(TEXT("Floor two stays at its original height after showing the room"),
+            FindLift(Host, 2)->GetActorLocation().Equals(Room->FloorTwoLocation, 0.1));
+        TestTrue(TEXT("Only fresh lookup works after showing the room"), Room->Caller.Signal(TEXT("Shown"), 0) &&
+            Room->Output(TEXT("Stale")) && Room->Output(TEXT("New")));
+        for (auto Stream : {Room->Host, Room->Client})
+        {
+            Stream->SetShouldBeVisible(false);
+            Stream->SetShouldBeLoaded(false);
+        }
+        return true;
+    });
+    Steps(TEXT("fully unload the room on both peers"), [this, Room]
+    {
+        if (Room->Host->GetLoadedLevel() || Room->Client->GetLoadedLevel()) return false;
+        TestTrue(TEXT("Registry has no freight lift after unload"),
+            FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTargetRegistry>()->FindTargets(TEXT("FreightLift")).IsEmpty());
+        for (auto Stream : {Room->Host, Room->Client})
+        {
+            Stream->SetShouldBeLoaded(true);
+            Stream->SetShouldBeVisible(true);
+        }
+        return true;
+    });
+    Steps(TEXT("resolve the reloaded actor and start another ride"), [this, Room]
+    {
+        if (!AtFloor(FindPeer(NM_ListenServer), 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
+        TestTrue(TEXT("New ride awaits completion"), Room->Caller.Signal(TEXT("Reloaded"), 0) && Room->Caller.IsWaitingOnOperation());
+        return true;
+    });
+    Steps(TEXT("client sees arrival from the reloaded room"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        Room->Caller.ResumeCompletedOperation();
+        if (!AtFloor(Host, 2, 6, 2) || !AtFloor(FindPeer(NM_Client), 2, 6, 2)) return false;
+        const FVector FloorSix = Room->FloorTwoLocation + FVector(0, 0, 4 * 200);
+        TestTrue(TEXT("Reloaded lift arrives at the physical sixth floor"), FindLift(Host, 2)->GetActorLocation().Equals(FloorSix, 0.1));
+        if (!FindLift(FindPeer(NM_Client), 2)->GetActorLocation().Equals(FloorSix, 1)) return false;
+        TestTrue(TEXT("Persistent caller finishes its new ride"), Room->Output(TEXT("Arrived")));
+        int32 Unloaded = 0, Gone = 0;
+        Host->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& Event, const UObject*)
+        {
+            FString Reason;
+            if (!Event.TryGetStringField(TEXT("reason"), Reason) || Event.GetStringField(TEXT("status")) != TEXT("Cancelled")) return;
+            if (Reason == TEXT("TargetUnloaded")) ++Unloaded;
+            if (Reason == TEXT("TargetGone")) ++Gone;
+        });
+        TestEqual(TEXT("One interrupted ride"), Unloaded, 1);
+        TestEqual(TEXT("Each stale call has its own TargetGone result"), Gone, 3);
         return true;
     });
     EndListenSession();

@@ -1,0 +1,76 @@
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+#include "AngelIOMapValidation.h"
+#include "AngelIOScriptComponent.h"
+#include "../AngelIOExampleLift.h"
+#include "../AngelIOPlayerController.h"
+#include "GameFramework/WorldSettings.h"
+#include "Misc/AutomationTest.h"
+#include "Tests/AutomationCommon.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOMapContract, "AngelIO.Editor.MapContracts",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOMapContract::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    auto* World = Scene.GetTestWorld();
+    World->GetWorldSettings()->DefaultGameMode = AAngelIODemoGameMode::StaticClass();
+    auto* A = World->SpawnActor<AAngelIOExampleLift>();
+    auto* B = World->SpawnActor<AAngelIOExampleLift>();
+    if (!A || !B) return false;
+    A->Address->SetTargetName(TEXT("FreightLift"));
+    B->Address->SetTargetName(TEXT("ServiceLiftB"));
+    const auto Healthy = AngelIO::ValidateMap(*World);
+    TestEqual(TEXT("Two placed lifts and two controller panels"), Healthy.MissionsChecked, 4);
+    TestTrue(TEXT("Group can contain both lifts"), Healthy.Diagnostics.IsEmpty());
+
+    B->Address->SetTargetName(TEXT("FREIGHTLIFT"));
+    A->Mission->InitialInputs.Add(TEXT("TravelSpeed"), FAngelIOValue{});
+    A->Mission->InitialInputs.Add(TEXT("startingFloor"), FAngelIOValue{});
+    B->Mission->Script.Empty();
+    auto Broken = AngelIO::ValidateMap(*World);
+    TestFalse(TEXT("Invalid contracts fail validation"), Broken.IsValid());
+    auto Find = [&](const TCHAR* Code, const TCHAR* Field)
+    {
+        return Broken.Diagnostics.FindByPredicate([&](const auto& D) { return D.Code == Code && D.Field == Field; });
+    };
+    TestTrue(TEXT("Unknown case-sensitive input"), Find(TEXT("input_unknown"), TEXT("startingFloor")) != nullptr);
+    TestTrue(TEXT("Rejects int input for float"), Find(TEXT("input_type"), TEXT("TravelSpeed")) != nullptr);
+    TestTrue(TEXT("Empty auto-start script"), Find(TEXT("script_missing"), TEXT("Script")) != nullptr);
+    const auto* Ambiguous = Find(TEXT("target_ambiguous"), TEXT("FreightLift"));
+    TestTrue(TEXT("Typed lookup identifies both actors and the panel source line"), Ambiguous && Ambiguous->Line > 0 &&
+        Ambiguous->Component->Script == TEXT("TypedLift.as") && Ambiguous->Message.Contains(A->GetPathName()) &&
+        Ambiguous->Message.Contains(B->GetPathName()));
+
+    A->Address->SetTargetName(NAME_None);
+    B->Address->SetTargetName(NAME_None);
+    B->Mission->Script = TEXT("NoSuchAngelIOTestFile.as");
+    A->Mission->SetTargetName(NAME_None);
+    B->Mission->SetTargetName(NAME_None);
+    Broken = AngelIO::ValidateMap(*World);
+    TestTrue(TEXT("Missing lookup and missing group"), Find(TEXT("target_missing"), TEXT("FreightLift")) &&
+        Find(TEXT("target_missing"), TEXT("DemoLifts")));
+    TestTrue(TEXT("File error identifies the owning component"),
+        Find(TEXT("script_compile"), TEXT("Script")) && Find(TEXT("script_compile"), TEXT("Script"))->Component == B->Mission);
+
+    FAngelIOProgram Calls;
+    const TCHAR* Source = TEXT(R"(namespace Helper {
+        void FindLift(const string &in name) {}
+        void Local() { FindLift("NotAnEndpoint"); }
+    }
+    void Run() {
+        // SendTo("Comment", "", 0);
+        string name = "Dynamic";
+        SendTo(name, "Go", 1);
+        SendTo("Prefix" + name, "Go", 1);
+        SendTo(
+            "LiteralGroup", "Go", 1);
+    })");
+    if (!TestTrue(TEXT("Compile direct, computed, commented and shadowed calls"), Calls.Compile(TEXT("Calls.as"), Source))) return false;
+    const auto& Literals = Calls.LiteralTargets();
+    TestTrue(TEXT("Only the direct group call is checked, with its original line"), Literals.Num() == 1 &&
+        Literals[0].Name == TEXT("LiteralGroup") && Literals[0].Line == 10);
+    return true;
+}
+#endif
