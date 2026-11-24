@@ -13,6 +13,7 @@
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
+#include "Engine/Level.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "EngineUtils.h"
 #include "Settings/LevelEditorPlaySettings.h"
@@ -99,12 +100,22 @@ bool TripOutput(UAngelIOScriptComponent* Panel, const TCHAR* Name, int32 Expecte
     return Panel && Panel->GetOutput(Name, Value) && Value.Integer == Expected;
 }
 
-ULevelStreamingDynamic* LoadLiftRoom(UWorld* World)
+ULevelStreamingDynamic* LoadLiftRoom(UWorld* World, bool bInitiallyVisible = true, const FString& RoomName = TEXT("AngelIOStreamedRoom"))
 {
     bool bSuccess = false;
-    auto* Stream = ULevelStreamingDynamic::LoadLevelInstance(World, TEXT("/Game/Demo/TwoLifts"),
-        FVector(1200, -1600, 300), FRotator::ZeroRotator, bSuccess, TEXT("AngelIOStreamedRoom"));
+    ULevelStreamingDynamic::FLoadLevelInstanceParams Params(World, TEXT("/Game/Demo/TwoLifts"), FTransform(FVector(1200, -1600, 300)));
+    Params.OptionalLevelNameOverride = &RoomName;
+    Params.bInitiallyVisible = bInitiallyVisible;
+    auto* Stream = ULevelStreamingDynamic::LoadLevelInstance(Params, bSuccess);
     return bSuccess ? Stream : nullptr;
+}
+
+UAngelIOScriptComponent* DeliveryPanel(ULevelStreamingDynamic* Room, int32 StartupFloor = 3)
+{
+    if (Room && Room->GetLoadedLevel())
+        for (const auto& Actor : Room->GetLoadedLevel()->Actors)
+            if (auto* Lift = Cast<AAngelIOExampleLift>(Actor); Lift && Lift->RequestedFloor == StartupFloor) return Lift->Address;
+    return nullptr;
 }
 }
 
@@ -549,6 +560,175 @@ bool FAngelIOWaitActorListen::RunTest(const FString&)
         TestEqual(TEXT("One lookup timed out"), TimedOut, 1);
         TestEqual(TEXT("Only ready lookups called MoveTo"), Rides, 2);
         TestEqual(TEXT("Stopped unbounded wait cleaned up"), Detached, 1);
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointListen, "AngelIO.Network.ListenServer.MissionCheckpoints",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCheckpointListen::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession(TEXT("/Engine/Maps/Entry"));
+    struct FRoom
+    {
+        TWeakObjectPtr<ULevelStreamingDynamic> Host, Client, Late, CompletedRoom;
+        TWeakObjectPtr<UAngelIOScriptComponent> SavedPanel;
+        FGuid SavedInstance;
+
+        void Unload() const
+        {
+            for (auto Stream : {Host, Client})
+            {
+                Stream->SetShouldBeVisible(false);
+                Stream->SetShouldBeLoaded(false);
+            }
+        }
+    };
+    const auto Room = MakeShared<FRoom>();
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("load a hidden room for the host and a connected client"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client || !Client->GetFirstPlayerController() || !Client->GetFirstPlayerController()->GetNetConnection()) return false;
+        Room->Host = LoadLiftRoom(Host, false);
+        Room->Client = LoadLiftRoom(Client, false);
+        TestTrue(TEXT("Created room on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
+        return true;
+    });
+    auto ShowRoom = [&]
+    {
+        Steps(TEXT("assign the room mission before BeginPlay and show it"), [Room]
+        {
+            if (!Room->Host->GetLoadedLevel() || !Room->Client->GetLoadedLevel()) return false;
+            for (const int32 Floor : {2, 3})
+            {
+                auto* Panel = DeliveryPanel(Room->Host.Get(), Floor);
+                if (!Panel) return false;
+                Panel->Script = TEXT("Examples/RoomDelivery.as");
+                Panel->bStartOnBeginPlay = true;
+            }
+            Room->Host->SetShouldBeVisible(true);
+            Room->Client->SetShouldBeVisible(true);
+            return true;
+        });
+    };
+    auto ReloadRoom = [&]
+    {
+        Steps(TEXT("both peers fully unloaded the room before loading it again"), [Room]
+        {
+            if (Room->Host->GetLoadedLevel() || Room->Client->GetLoadedLevel()) return false;
+            // Exercise reconstruction from a fresh UObject, including when the engine would normally defer GC.
+            if (Room->SavedPanel.IsValid()) CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+            Room->Host->SetShouldBeLoaded(true);
+            Room->Client->SetShouldBeLoaded(true);
+            return true;
+        });
+        ShowRoom();
+    };
+    auto Dispatch = [&]
+    {
+        Steps(TEXT("a room with no committed delivery accepts dispatch"), [this, Room]
+        {
+            auto* Client = DeliveryPanel(Room->Client.Get());
+            if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch") || !TripOutput(Client, TEXT("Stage"), 0)) return false;
+            TestFalse(TEXT("Client cannot advance the authoritative mission"), Client->SendSignal(TEXT("Confirm"), 0));
+            TestTrue(TEXT("Dispatch the freight lift"), DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
+            return true;
+        });
+    };
+    ShowRoom();
+    Dispatch();
+    Steps(TEXT("unload before the ride can commit its checkpoint"), [Room]
+    {
+        if (DeliveryPanel(Room->Host.Get())->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+        Room->Unload();
+        return true;
+    });
+    ReloadRoom();
+    Dispatch();
+    Steps(TEXT("successful arrival commits Delivered"), [Room]
+    {
+        auto* Client = DeliveryPanel(Room->Client.Get());
+        if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
+        Room->SavedPanel = DeliveryPanel(Room->Host.Get());
+        Room->SavedInstance = Room->SavedPanel->InspectMission().Instance;
+        Room->Unload();
+        return true;
+    });
+    ReloadRoom();
+    Steps(TEXT("a new VM restores Delivered and waits for confirmation"), [this, Room]
+    {
+        auto* Client = DeliveryPanel(Room->Client.Get());
+        if (!Client || Client->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Client, TEXT("Stage"), 1)) return false;
+        auto* Panel = DeliveryPanel(Room->Host.Get());
+        TestTrue(TEXT("Restored stage in a fresh VM"), Room->SavedInstance.IsValid() &&
+            Panel->InspectMission().Instance != Room->SavedInstance);
+        TestTrue(TEXT("Checkpoint survives replacement of the original component"), Room->SavedPanel.Get() != Panel);
+        TestEqual(TEXT("Second component using the same script has independent progress"),
+            DeliveryPanel(Room->Host.Get(), 2)->GetWaitingSignal(), FString(TEXT("Dispatch")));
+        TestTrue(TEXT("Restored signal subscription accepts confirmation"), Panel->SendSignal(TEXT("Confirm"), 0));
+        return true;
+    });
+    Steps(TEXT("client observes completion before unload"), [Room]
+    {
+        if (!TripOutput(DeliveryPanel(Room->Client.Get()), TEXT("Stage"), 2)) return false;
+        Room->Unload();
+        return true;
+    });
+    ReloadRoom();
+    Steps(TEXT("restore terminal progress and verify the delivery history"), [this, Room]
+    {
+        if (!TripOutput(DeliveryPanel(Room->Client.Get()), TEXT("Stage"), 2)) return false;
+        TestTrue(TEXT("Completed mission finishes immediately"), DeliveryPanel(Room->Host.Get())->InspectMission().State == EAngelIOState::Finished);
+        TSet<FString> Deliveries;
+        int32 Arrivals = 0, Interruptions = 0;
+        FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& E, const UObject*)
+        {
+            const FString Id = E.GetStringField(TEXT("operationId"));
+            const FString Type = E.GetStringField(TEXT("type"));
+            if (Type == TEXT("call") && E.GetStringField(TEXT("operation")) == TEXT("Lift.MoveTo") &&
+                E.GetObjectField(TEXT("caller"))->GetStringField(TEXT("script")) == TEXT("Examples/RoomDelivery.as"))
+                Deliveries.Add(Id);
+            if (Type != TEXT("complete") || !Deliveries.Contains(Id)) return;
+            if (E.GetStringField(TEXT("status")) == TEXT("Arrived")) ++Arrivals;
+            FString Reason;
+            if (E.TryGetStringField(TEXT("reason"), Reason) && Reason == TEXT("TargetUnloaded")) ++Interruptions;
+        });
+        TestEqual(TEXT("No replay after the committed checkpoint"), Deliveries.Num(), 2);
+        TestEqual(TEXT("One interrupted attempt"), Interruptions, 1);
+        TestEqual(TEXT("Exactly one successful delivery"), Arrivals, 1);
+        GEditor->RequestLateJoin();
+        return true;
+    });
+    Steps(TEXT("load the completed room on a late client"), [this, Room]
+    {
+        auto* Late = FindPeer(NM_Client, Room->Client->GetWorld());
+        if (!Late || !Late->GetFirstPlayerController() || !Late->GetFirstPlayerController()->GetNetConnection()) return false;
+        Room->Late = LoadLiftRoom(Late);
+        TestTrue(TEXT("Created late client's room"), Room->Late.IsValid());
+        return true;
+    });
+    Steps(TEXT("late client sees the restored final stage before another room instance loads"), [this, Room]
+    {
+        if (!TripOutput(DeliveryPanel(Room->Late.Get()), TEXT("Stage"), 2)) return false;
+        Room->CompletedRoom = Room->Host;
+        Room->Host = LoadLiftRoom(FindPeer(NM_ListenServer), false, TEXT("AngelIOSecondDeliveryRoom"));
+        Room->Client = LoadLiftRoom(Room->Client->GetWorld(), false, TEXT("AngelIOSecondDeliveryRoom"));
+        TestTrue(TEXT("Created a distinct instance of the same map"), Room->Host.IsValid() && Room->Client.IsValid());
+        return true;
+    });
+    ShowRoom();
+    Steps(TEXT("identical actor and component names in a second room start fresh"), [this, Room]
+    {
+        auto* Client = DeliveryPanel(Room->Client.Get());
+        if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch")) return false;
+        TestTrue(TEXT("Room instance isolates progress"), TripOutput(Client, TEXT("Stage"), 0) &&
+            TripOutput(DeliveryPanel(Room->CompletedRoom.Get()), TEXT("Stage"), 2));
         return true;
     });
     EndListenSession();

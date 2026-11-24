@@ -125,6 +125,14 @@ Scripts start at `BeginPlay` by default. To observe the first event in Blueprint
 - An exception discards the current batch of outgoing events and reports diagnostics to `LogAngelIO`. `GetWaitingSignal` shows what the instance is waiting for.
 - The component owns the execution context. `StopScript` and `EndPlay` release it and clear its wait. Call the component from the game thread.
 
+### Resume a mission when its room returns
+
+Call `SaveCheckpoint("Delivered", 1)` after the delivery succeeds. On the next activation, the component starts a fresh `Run()`. Read `LoadCheckpoint(1)` there and enter the matching stage. The saved name survives unloading, and the new VM sets up its own signal waits. The default version is `1`. A missing record or a different version returns an empty string.
+
+In the two-lift map, add a script component to a replicated actor in the streamed room and assign `Examples/RoomDelivery.as`. Send `Dispatch` on the server. The script waits for the freight lift to arrive on floor 4, commits `Delivered` and publishes `out_Stage = 1`. Unload and reload the room. The component now waits for `Confirm`. Sending that signal commits `Complete` and publishes stage 2, which clients also see on a later reload or late join. [Delivery mission](Content/AngelIO/Examples/RoomDelivery.as)
+
+Progress belongs to one instance of the room, one placed actor component and one script, for the lifetime of the server world. Reuse the same level-instance name when recreating a dynamic room. Give a second copy its own instance name for independent progress. Bump the checkpoint version when a script change makes old stage names incompatible. A new PIE session starts fresh.
+
 ## Use the plugin in your project
 
 Copy [Plugins/AngelIO](Plugins/AngelIO) into a C++ project and enable the plugin. Put mission files in `Content/AngelIO`. Add `AngelIO` to **Project Settings → Packaging → Additional Non-Asset Directories to Package** so newly added scripts ship with the game. The demo already includes this setting. [Demo packaging configuration](Config/DefaultGame.ini)
@@ -230,6 +238,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `HandleLifetimeAndTimeout` | Reassigns a name while a script holds the original lift. Checks a timed wait, eventual arrival, a client request to the replacement, replication and the stale handle's cancellation reason. |
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
 | `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
+| `MissionCheckpoints` | Interrupts and retries a delivery, reloads both committed stages, checks exactly one arrival and verifies the late client's state and a second room's independent progress. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.

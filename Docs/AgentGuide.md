@@ -75,6 +75,14 @@ The game module defines lift readiness. Other providers can use `FindUniqueActor
 
 Each typed lift handle captures the actor's play generation. The lift increments it in `EndPlay`. When a streamed level becomes hidden, Unreal can call `BeginPlay` again on the same actor. Treat `TargetUnloaded` as the terminal reason for a ride interrupted by level removal and `TargetGone` as the reason for calling through the expired handle. A persistent caller can call `WaitActor` again. If its own component belongs to the unloaded room, its VM detaches on removal. [Listen-server streaming regressions](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
 
+### Restore a streamed mission's checkpoint
+
+`SaveCheckpoint(stage, version)` synchronously replaces the checkpoint for the executing component and script in the authoritative world. The stage is a nonempty name and the version is a positive integer, defaulting to 1. `LoadCheckpoint(version)` returns the saved name for that version, or `""` for a fresh or incompatible record. Call these from a component-backed `Run()` or its callees. Saving at a later version replaces the older record.
+
+Place the save after the action that establishes the stage. For a native operation, check its terminal result first. On re-entry, branch in `Run()` to re-establish waits and publish the outputs appropriate for that stage. Locals, handles and pending operations belong to the old VM. A checkpoint stores the stage name. An interrupted action follows the retry or recovery logic of the last committed stage. Queued `Emit` and `SendTo` events dispatch when the VM yields or returns, so use a completion signal when delivery itself needs confirmation.
+
+Keys use the level-instance package, the actor/component object path inside that level and the script path. Keep these identities stable when recreating a room. Two copies of the map keep separate records. `TargetName` can change independently. Checkpoints live in server memory until world teardown. A late client observes the restored mission's replicated outputs and waiting signal. [Working mission](../Content/AngelIO/Examples/RoomDelivery.as) · [Listen-server scenario](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
+
 ## Listen-server investigation
 
 Run **Play As Listen Server** with **2 players** and **Run Under One Process** on `/Game/Demo/TwoLifts`. The host runs both players' missions. Each player owns a separate `TripPanel` on their controller. Client input travels through the owning controller's server RPC. `GetOutput` and `GetWaitingSignal` on the client read the latest replicated public state. Use `OnPublicStateChanged` for persistent UI. Opted-in `OnPresentationSignal` effects use unreliable multicast and can arrive before state updates. Late joiners receive current state. [Controller and RPC checks](../Source/AngelIOHost/AngelIOPlayerController.cpp) · [Replication and callbacks](../Plugins/AngelIO/Source/AngelIO/Private/AngelIOScriptComponent.cpp)
@@ -170,8 +178,8 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Compiler.Contract` | Compilation, public contract, diagnostics and runtime failure cases |
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
-| `AngelIO.Missions.` | Independent lift instances and overlapping typed operations |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor` using networked PIE |
+| `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints` using networked PIE |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 **Run the MCP integration.** This exercises an actual stdio client, reads project files and checks diagnostics for both valid and invalid scripts and maps. To include the trace assertions, use the basename of the listen-server export from the `TypedTrips` scenario as the extra argument `--trace <basename>` on the `node` command. That fixture contains six distinct calls. Pass `--timeout-trace <basename>` from `HandleLifetimeAndTimeout` to verify the poll, expired wait and final arrival for one operation ID. A manual ride or an inspector-only run has a different history. [Smoke test](../Tools/MCP/smoke.mjs)

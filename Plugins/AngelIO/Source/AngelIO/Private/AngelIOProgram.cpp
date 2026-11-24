@@ -1,4 +1,5 @@
 #include "AngelIOProgram.h"
+#include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOScriptAPI.h"
 #include "AngelIOTraceSubsystem.h"
 #include "Components/ActorComponent.h"
@@ -209,8 +210,8 @@ struct FAngelIOProgram::FImpl
     TMap<int32, FString> Inputs, Outputs;
     TArray<FAngelIOEvent> Events;
     FExecutionScope Scope;
-#if WITH_EDITOR
     FString ScriptSection;
+#if WITH_EDITOR
     TArray<FAngelIOLiteralTarget> LiteralTargets;
 
     // The SDK lexer excludes comments and quoted source text from call matching.
@@ -377,6 +378,52 @@ struct FAngelIOProgram::FImpl
             asGetActiveContext()->SetException("SignalValue requires an active mission context");
     }
 
+    static void AccessCheckpoint(asIScriptGeneric* Call, bool bSave)
+    {
+        auto* Context = asGetActiveContext();
+        const auto* Self = static_cast<FImpl*>(Context->GetUserData());
+        // AngelScript owns the return slot even when a native binding raises an exception.
+        std::string* Result = bSave ? nullptr : new (Call->GetAddressOfReturnLocation()) std::string();
+        const auto* Component = Self ? Self->Scope.Component.Get() : nullptr;
+        auto* World = Self ? Self->Scope.World.Get() : nullptr;
+        const auto* Owner = Component ? Component->GetOwner() : nullptr;
+        if (!Self || !Self->bInRun || !World || World->GetNetMode() == NM_Client || !IsValid(Owner) ||
+            !Owner->HasAuthority() || !Owner->GetLevel() || Component->GetWorld() != World)
+        {
+            Context->SetException("Checkpoints require an authoritative mission component in Run");
+            return;
+        }
+        const int32 Version = static_cast<int32>(Call->GetArgDWord(bSave ? 1 : 0));
+        if (Version < 1)
+        {
+            Context->SetException("Checkpoint version must be positive");
+            return;
+        }
+        auto* Store = World->GetSubsystem<UAngelIOCheckpointSubsystem>();
+        if (!Store)
+        {
+            Context->SetException("Checkpoint store is unavailable in this world");
+            return;
+        }
+        if (bSave)
+        {
+            const auto& Stage = *static_cast<const std::string*>(Call->GetArgObject(0));
+            if (Stage.empty() || Stage.find('\0') != std::string::npos)
+            {
+                Context->SetException("Checkpoint stage must be non-empty and contain no null characters");
+                return;
+            }
+            Store->Save(*Component, Self->ScriptSection, Version, FUtf8String(reinterpret_cast<const UTF8CHAR*>(Stage.c_str())));
+        }
+        else
+        {
+            const FUtf8String Stage = Store->Load(*Component, Self->ScriptSection, Version);
+            Result->assign(reinterpret_cast<const char*>(*Stage), Stage.Len());
+        }
+    }
+    static void LoadCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, false); }
+    static void SaveCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, true); }
+
     // Give the public functions the enum types declared by this mission. Use the
     // SDK tokenizer so comments, strings and enums inside namespaces stay local.
     void AddSignalBindings(std::string_view Source)
@@ -489,6 +536,11 @@ struct FAngelIOProgram::FImpl
 FAngelIOProgram::FAngelIOProgram() : Impl(MakeUnique<FImpl>()) {}
 FAngelIOProgram::~FAngelIOProgram() = default;
 
+void FAngelIOProgram::DetachComponent()
+{
+    Impl->Scope.Component.Reset();
+}
+
 bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
 {
     const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("AngelIO"));
@@ -509,8 +561,8 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     Impl = MakeUnique<FImpl>();
     auto& S = *Impl;
     S.Engine = asCreateScriptEngine();
-#if WITH_EDITOR
     S.ScriptSection = Label;
+#if WITH_EDITOR
     TArray<FAngelIOMapLookup> MapLookups{{TEXT("SendTo"), nullptr, false}};
 #endif
     if (!S.Engine) return S.Fail(TEXT("Could not create AngelScript engine"));
@@ -522,6 +574,8 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
         S.Engine->RegisterGlobalFunction("void Emit(const ?&in, int)", asFUNCTION(FImpl::Emit), asCALL_GENERIC) < 0 ||
         S.Engine->SetDefaultNamespace("") < 0 ||
         S.Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
+        S.Engine->RegisterGlobalFunction("string LoadCheckpoint(int version = 1)", asFUNCTION(FImpl::LoadCheckpoint), asCALL_GENERIC) < 0 ||
+        S.Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
         return S.Fail(TEXT("Could not register AngelIO script API"));
     auto& Engine = *S.Engine;

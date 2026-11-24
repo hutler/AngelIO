@@ -40,7 +40,7 @@ void UAngelIOScriptComponent::EndPlay(const EEndPlayReason::Type Reason)
     if (auto* Registry = GetWorld()->GetSubsystem<UAngelIOTargetRegistry>())
         Registry->Unregister(TargetName, this);
     Pending.Reset();
-    Program.Reset();
+    ReleaseProgram();
     PublicState = {};
     Super::EndPlay(Reason);
 }
@@ -72,6 +72,7 @@ bool UAngelIOScriptComponent::StartScript()
 {
     if (!CanRunMission()) return false;
     Pending.Reset();
+    ReleaseProgram();
     Program = MakeShared<FAngelIOProgram>();
     auto Running = Program;
     const bool bStarted = Running->CompileFile(Script) && Running->Start(InitialInputs, GetWorld(), this);
@@ -90,8 +91,15 @@ void UAngelIOScriptComponent::StopScript()
 {
     if (!CanRunMission()) return;
     Pending.Reset();
-    Program.Reset();
+    ReleaseProgram();
     PublishState();
+}
+
+void UAngelIOScriptComponent::ReleaseProgram()
+{
+    // A native callback can stop or replace the VM while Run still holds it on the stack.
+    if (Program) Program->DetachComponent();
+    Program.Reset();
 }
 
 bool UAngelIOScriptComponent::SetInput(const FString& Name, FAngelIOValue Value)

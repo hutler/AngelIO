@@ -6,6 +6,48 @@
 #include "Tests/AngelIOTestSignalObserver.h"
 #include "Tests/AutomationCommon.h"
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointContract, "AngelIO.Missions.CheckpointContract",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCheckpointContract::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* World = Scene.GetTestWorld();
+    auto* Lift = World->SpawnActor<AAngelIOExampleLift>();
+    if (!Lift) return false;
+    Lift->bRequestOnStart = false;
+    if (!Scene.BeginPlayInTestWorld()) return false;
+    auto Run = [World](const TCHAR* File, UActorComponent* Component, const TCHAR* Body)
+    {
+        FAngelIOProgram P;
+        FAngelIOValue Ok;
+        return P.Compile(File, FString(TEXT("bool out_Ok; void Run() { ")) + Body + TEXT(" }")) &&
+            P.Start({}, World, Component) && P.GetOutput(TEXT("Ok"), Ok) && Ok.Boolean;
+    };
+    const TCHAR* File = TEXT("Mission.as");
+    TestTrue(TEXT("New checkpoints default to version one"), Run(File, Lift->Address,
+        TEXT("out_Ok = LoadCheckpoint() == \"\"; SaveCheckpoint(\"Arrived\");")));
+    TestTrue(TEXT("A new VM reads version one and can replace it with version two"), Run(File, Lift->Address,
+        TEXT("out_Ok = LoadCheckpoint(2) == \"\" && LoadCheckpoint(1) == \"Arrived\"; SaveCheckpoint(\"AtDock\", 2);")));
+    TestTrue(TEXT("Another script on the same component starts fresh"), Run(TEXT("Other.as"), Lift->Address,
+        TEXT("out_Ok = LoadCheckpoint(2) == \"\";")));
+    TestTrue(TEXT("Another component of the same actor starts fresh"), Run(File, Lift->Mission,
+        TEXT("out_Ok = LoadCheckpoint(2) == \"\";")));
+    auto Fails = [World](const TCHAR* Source, UActorComponent* Component, const TCHAR* Error)
+    {
+        FAngelIOProgram P;
+        return P.Compile(TEXT("Mission.as"), Source) && !P.Start({}, World, Component) &&
+            P.Diagnostics().ContainsByPredicate([Error](const auto& D) { return D.Message.Contains(Error); });
+    };
+    TestTrue(TEXT("Reject empty stage"), Fails(TEXT("void Run() { SaveCheckpoint(\"\", 2); }"), Lift->Address, TEXT("non-empty")));
+    TestTrue(TEXT("Reject zero version"), Fails(TEXT("void Run() { LoadCheckpoint(0); }"), Lift->Address, TEXT("positive")));
+    TestTrue(TEXT("A component is required"), Fails(TEXT("void Run() { LoadCheckpoint(); }"), nullptr, TEXT("mission component")));
+    TestTrue(TEXT("Rejected writes leave the latest version intact"), Run(File, Lift->Address,
+        TEXT("out_Ok = LoadCheckpoint() == \"\" && LoadCheckpoint(2) == \"AtDock\";")));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOLifts, "AngelIO.Missions.TwoLifts",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

@@ -102,6 +102,8 @@ public:
 #endif
 
 private:
+    friend class UAngelIOScriptComponent;
+    void DetachComponent();
     struct FImpl;
     TUniquePtr<FImpl> Impl;
 };

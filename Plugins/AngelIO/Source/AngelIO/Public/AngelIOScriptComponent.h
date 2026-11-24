@@ -106,6 +106,7 @@ private:
     void MulticastPresentationSignal(const FString& Name, int32 Value);
 
     bool CanRunMission() const;
+    void ReleaseProgram();
     void PublishState();
     TSharedPtr<FAngelIOProgram> Program;
     TArray<FAngelIOEvent> Pending;

@@ -89,6 +89,10 @@ try {
   assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name, float timeoutSeconds)"));
   assert(!api.externalDeclarations.some(s => s.includes("AngelIOInternal::")));
   assert((await call("validate_script", { script: "Examples/StreamedLift.as" })).structuredContent.valid);
+  assert(api.calls.some(s => s.startsWith("string LoadCheckpoint(")));
+  assert(api.calls.some(s => s.startsWith("void SaveCheckpoint(")));
+  const delivery = (await call("validate_script", { script: "Examples/RoomDelivery.as" })).structuredContent;
+  assert(delivery.valid && delivery.inputSignals.includes("Confirm") && delivery.ports.some(p => p.name === "Stage" && p.direction === "out"));
   const mapReport = (await call("validate_map", { map: "/Game/Demo/TwoLifts" })).structuredContent;
   assert(mapReport.valid && mapReport.missionsChecked === 4, JSON.stringify(mapReport));
   const missing = (await call("validate_map", { map: "/Game/Demo/NoSuchAngelIOMap" })).structuredContent;
