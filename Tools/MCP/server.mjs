@@ -127,18 +127,22 @@ const checkpointEvent = z.object({
   caller: z.object({ instanceId: guid, script: z.string(), line: z.number().int(), component: z.string() }).passthrough()
 }).passthrough();
 const traceFields = { sessionId: guid, world: z.string(), netMode: z.string(), droppedEvents: z.number().int().nonnegative() };
+const counter = z.number().int().nonnegative();
+const bytecodeCache = z.object({ budgetBytes: counter, retainedBytes: counter, hits: counter, evictions: counter });
 const stateEvent = z.object({
   ...eventFields, type: z.enum(["stateSaved", "stateRestored"]), stateId: guid,
   target: z.string(), component: z.string(), field: z.string(), value: z.number().int()
 });
+const missionEvents = z.array(z.union([operationEvent, checkpointEvent, stateEvent]));
 const traceSchema = z.discriminatedUnion("schemaVersion", [
   z.object({ ...traceFields, schemaVersion: z.literal(1), events: z.array(operationEvent) }),
   z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) }),
-  z.object({ ...traceFields, schemaVersion: z.literal(3), events: z.array(z.union([operationEvent, checkpointEvent, stateEvent])) })
+  z.object({ ...traceFields, schemaVersion: z.literal(3), events: missionEvents }),
+  z.object({ ...traceFields, schemaVersion: z.literal(4), bytecodeCache: bytecodeCache.nullable(), events: missionEvents })
 ]);
 
 server.registerTool("read_trace", {
-  description: "Read exported mission events from Saved/AngelIO/Traces. Filter rides by operationId, mission stages by checkpointId, or saved and restored lift floors by stateId. Each server session has its own export. Reuse the trace filename when paging.",
+  description: "Read exported mission events and the world's bytecode cache snapshot (budgetBytes, retainedBytes, cumulative hits and evictions). Filter rides by operationId, mission stages by checkpointId, or saved and restored lift floors by stateId. Reuse the trace filename when paging.",
   inputSchema: {
     trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
     operationId: guid.optional(),
@@ -150,7 +154,7 @@ server.registerTool("read_trace", {
 }, async ({ trace, operationId, checkpointId, stateId, afterSequence, limit }) => {
   if ([operationId, checkpointId, stateId].filter(Boolean).length > 1) throw new Error("Choose one of operationId, checkpointId or stateId.");
   const directory = path.join(path.dirname(project), "Saved", "AngelIO", "Traces");
-  const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with mission events.";
+  const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with mission events or a registered script engine.";
   let entries;
   try { entries = await readdir(directory, { withFileTypes: true }); }
   catch (error) { if (error.code === "ENOENT") throw new Error(noExports); throw error; }

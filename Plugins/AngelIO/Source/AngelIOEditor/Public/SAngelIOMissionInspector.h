@@ -17,6 +17,7 @@ public:
 private:
     friend class FAngelIOInspectorPIE;
     friend class FAngelIOSharedInspectorPIE;
+    friend class FAngelIOStreamedBytecode;
     friend class FAngelIOCheckpointListen;
     friend class FAngelIOCheckpointRestart;
     struct FOperation
@@ -33,6 +34,7 @@ private:
     void CollectHistory(UAngelIOScriptComponent& Authority);
     void UpdateTimeline();
     FString CheckpointSummary() const;
+    FString BytecodeCacheSummary() const;
     FString PersistedStateSummary() const;
     TSharedRef<SWidget> WorldMenu();
     TSharedRef<SWidget> MissionMenu();

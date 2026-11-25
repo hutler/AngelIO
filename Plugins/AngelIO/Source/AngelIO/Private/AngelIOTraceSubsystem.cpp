@@ -9,6 +9,17 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAngelIOTrace, Log, All);
 
+static const TCHAR* TraceNetMode(const UWorld& World)
+{
+    switch (World.GetNetMode())
+    {
+    case NM_Client: return TEXT("client");
+    case NM_ListenServer: return TEXT("listenServer");
+    case NM_DedicatedServer: return TEXT("dedicatedServer");
+    default: return TEXT("standalone");
+    }
+}
+
 bool UAngelIOTraceSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 {
     const UWorld* World = Cast<UWorld>(Outer);
@@ -16,16 +27,16 @@ bool UAngelIOTraceSubsystem::ShouldCreateSubsystem(UObject* Outer) const
         (World->WorldType == EWorldType::Game || World->WorldType == EWorldType::PIE);
 }
 
+void UAngelIOTraceSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+    Super::OnWorldBeginPlay(InWorld);
+    NetMode = TraceNetMode(InWorld);
+}
+
 TSharedRef<FJsonObject> UAngelIOTraceSubsystem::Append(const FGuid& OperationId, const TCHAR* EventType, const UObject* Target)
 {
     check(IsInGameThread());
-    if (!SessionId.IsValid())
-    {
-        SessionId = FGuid::NewGuid();
-        const ENetMode Mode = GetWorld()->GetNetMode();
-        NetMode = Mode == NM_ListenServer ? TEXT("listenServer") :
-            Mode == NM_DedicatedServer ? TEXT("dedicatedServer") : TEXT("standalone");
-    }
+    if (Total == 0) NetMode = TraceNetMode(*GetWorld());
     auto Event = MakeShared<FJsonObject>();
     Event->SetNumberField(TEXT("sequence"), Total + 1);
     Event->SetNumberField(TEXT("worldSeconds"), GetWorld()->GetTimeSeconds());
@@ -60,13 +71,24 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
 {
     check(IsInGameThread());
     OutFile.Reset();
-    if (Events.IsEmpty()) return false;
+    const auto Cache = FinalCache.IsSet() ? FinalCache : AngelIO::GetBytecodeCacheStats(GetWorld());
+    if (Events.IsEmpty() && !Cache.IsSet()) return false;
     auto Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("schemaVersion"), 3);
+    Root->SetNumberField(TEXT("schemaVersion"), 4);
     Root->SetStringField(TEXT("sessionId"), SessionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Root->SetStringField(TEXT("world"), GetWorld()->GetName());
-    Root->SetStringField(TEXT("netMode"), NetMode);
+    Root->SetStringField(TEXT("netMode"), NetMode.IsEmpty() ? TraceNetMode(*GetWorld()) : NetMode);
     Root->SetNumberField(TEXT("droppedEvents"), Total - Events.Num());
+    if (Cache)
+    {
+        auto JsonCache = MakeShared<FJsonObject>();
+        JsonCache->SetNumberField(TEXT("budgetBytes"), Cache->BudgetBytes);
+        JsonCache->SetNumberField(TEXT("retainedBytes"), Cache->RetainedBytes);
+        JsonCache->SetNumberField(TEXT("hits"), Cache->Hits);
+        JsonCache->SetNumberField(TEXT("evictions"), Cache->Evictions);
+        Root->SetObjectField(TEXT("bytecodeCache"), JsonCache);
+    }
+    else Root->SetField(TEXT("bytecodeCache"), MakeShared<FJsonValueNull>());
     TArray<TSharedPtr<FJsonValue>> Ordered;
     Ordered.Reserve(Events.Num());
     for (int64 I = Total - Events.Num(); I < Total; ++I)
@@ -94,9 +116,16 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
     return true;
 }
 
+void UAngelIOTraceSubsystem::PreDeinitialize()
+{
+    // All world subsystems are still alive here, irrespective of their final teardown order.
+    FinalCache = AngelIO::GetBytecodeCacheStats(GetWorld());
+    Super::PreDeinitialize();
+}
+
 void UAngelIOTraceSubsystem::Deinitialize()
 {
-    if (GetWorld()->WorldType == EWorldType::PIE && !Events.IsEmpty())
+    if (GetWorld()->WorldType == EWorldType::PIE && (!Events.IsEmpty() || FinalCache.IsSet()))
     {
         FString Path;
         if (!Export(Path)) UE_LOG(LogAngelIOTrace, Warning, TEXT("Could not export PIE operation trace"));
@@ -126,7 +155,7 @@ void UAngelIOTraceSubsystem::VisitEvents(TFunctionRef<void(const FJsonObject&, c
 #endif
 
 static FAutoConsoleCommandWithWorld ExportTraceCommand(TEXT("AngelIO.ExportTrace"),
-    TEXT("Export this world's mission history to Saved/AngelIO/Traces."),
+    TEXT("Export this world's mission history and bytecode cache statistics to Saved/AngelIO/Traces."),
     FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
     {
         auto* Trace = World ? World->GetSubsystem<UAngelIOTraceSubsystem>() : nullptr;

@@ -89,6 +89,8 @@ bool FAngelIOSharedTrace::RunTest(const FString&)
     TSharedPtr<FJsonObject> Trace;
     if (!TestTrue(TEXT("Read exported trace"), FFileHelper::LoadFileToString(Text, *Path) &&
         FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Trace))) return false;
+    TestTrue(TEXT("Operations without a registered world engine report an unavailable cache"),
+        Trace->HasTypedField<EJson::Null>(TEXT("bytecodeCache")));
     TArray<FString> Timeline;
     for (const auto& Entry : Trace->GetArrayField(TEXT("events")))
     {
@@ -118,6 +120,40 @@ bool FAngelIOSharedTrace::RunTest(const FString&)
     TestTrue(TEXT("Negative timeout reports script error"), Invalid.Compile(TEXT("invalid.as"),
         TEXT("void Run() { WaitShared(-1); }")) && !Invalid.Start({}, World) &&
         Invalid.Diagnostics().ContainsByPredicate([](const auto& D) { return D.Message.Contains(TEXT("non-negative")); }));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCacheOnlyTrace, "AngelIO.Trace.CacheWithoutEvents",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCacheOnlyTrace::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* World = Scene.GetTestWorld();
+    World->URL.AddOption(TEXT("AngelIOBytecodeCacheKiB=32"));
+    auto* Trace = World->GetSubsystem<UAngelIOTraceSubsystem>();
+    FString LastSession;
+    for (int32 Visit = 0; Visit < 2; ++Visit)
+    {
+        FAngelIOProgram Mission;
+        FString Path, Json;
+        TSharedPtr<FJsonObject> Snapshot;
+        if (!TestTrue(TEXT("Compile a mission without operation events"), Mission.Compile(TEXT("Quiet.as"), TEXT("void Run() {}"), World)) ||
+            !TestTrue(TEXT("Export a cache-only snapshot"), Trace->Export(Path))) return false;
+        ON_SCOPE_EXIT { IFileManager::Get().Delete(*Path); };
+        if (!TestTrue(TEXT("Read cache-only export"), FFileHelper::LoadFileToString(Json, *Path) &&
+            FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Snapshot))) return false;
+        TestEqual(TEXT("No synthetic cache events"), Snapshot->GetArrayField(TEXT("events")).Num(), 0);
+        const FString Session = Snapshot->GetStringField(TEXT("sessionId"));
+        FGuid Id;
+        TestTrue(TEXT("Stable world session before its first event"), FGuid::Parse(Session, Id) && Id.IsValid() &&
+            (LastSession.IsEmpty() || Session == LastSession));
+        LastSession = Session;
+        const TSharedPtr<FJsonObject>* Cache = nullptr;
+        if (!TestTrue(TEXT("Cache-only export includes statistics"), Snapshot->TryGetObjectField(TEXT("bytecodeCache"), Cache))) return false;
+        TestEqual(TEXT("Hit count at export time"), (*Cache)->GetIntegerField(TEXT("hits")), Visit);
+    }
     return true;
 }
 

@@ -1,5 +1,6 @@
 // Usage: node smoke.mjs --project <demo.uproject> --editor <UnrealEditor-Cmd.exe>
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,9 +11,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const { values } = parseArgs({ options: {
   project: { type: "string" }, editor: { type: "string" }, trace: { type: "string" },
   "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" },
-  "landing-write-trace": { type: "string" }, "landing-read-trace": { type: "string" }
+  "landing-write-trace": { type: "string" }, "landing-read-trace": { type: "string" },
+  "cache-visits": { type: "string", multiple: true }
 } });
 const root = path.join(path.dirname(path.resolve(values.project)), "Content", "AngelIO");
+const traceDir = path.join(path.dirname(path.resolve(values.project)), "Saved", "AngelIO", "Traces");
 const client = new Client({ name: "angelio-smoke", version: "1" });
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -33,7 +36,40 @@ try {
   assert((await call("read_trace", { trace: "../DefaultEngine.ini" })).isError);
   const newest = await call("read_trace", { limit: 1 });
   if (newest.isError) assert.match(newest.content[0].text, /No AngelIO trace found/);
-  else assert.equal(newest.structuredContent.events.length, 1);
+  else assert(newest.structuredContent.events.length === 1 ||
+    (newest.structuredContent.events.length === 0 && newest.structuredContent.bytecodeCache));
+  for (const visits of values["cache-visits"] ?? []) {
+    const files = visits.split(",");
+    assert.equal(files.length, 2, "Pass the first-load and reload export basenames, separated by a comma");
+    const snapshots = [];
+    for (const trace of files) {
+      const reply = await call("read_trace", { trace, limit: 1 });
+      assert(!reply.isError, JSON.stringify(reply.content));
+      const snapshot = reply.structuredContent;
+      assert.equal(snapshot.schemaVersion, 4);
+      assert.equal(snapshot.netMode, "listenServer");
+      const cache = snapshot.bytecodeCache;
+      const exported = JSON.parse(await readFile(path.join(traceDir, trace), "utf8"));
+      assert.deepEqual(cache, exported.bytecodeCache);
+      assert.deepEqual(Object.keys(cache).sort(), ["budgetBytes", "evictions", "hits", "retainedBytes"]);
+      assert(cache.retainedBytes <= cache.budgetBytes);
+      assert.equal(Boolean(cache.retainedBytes), Boolean(cache.budgetBytes));
+      const empty = await call("read_trace", { trace, operationId: randomUUID(), afterSequence: Number.MAX_SAFE_INTEGER });
+      assert(!empty.isError, JSON.stringify(empty.content));
+      assert.deepEqual(empty.structuredContent.events, []);
+      assert.deepEqual(empty.structuredContent.bytecodeCache, cache);
+      snapshots.push(snapshot);
+    }
+    const [first, reload] = snapshots;
+    assert.equal(first.sessionId, reload.sessionId);
+    assert.notEqual(first.trace, reload.trace);
+    const before = first.bytecodeCache, after = reload.bytecodeCache;
+    assert.equal(after.budgetBytes, before.budgetBytes);
+    assert([0, 3072, 32768].includes(after.budgetBytes));
+    assert.equal(after.hits - before.hits, after.budgetBytes === 32768 ? 4 : 0);
+    assert.equal(after.evictions - before.evictions, after.budgetBytes === 3072 ? 4 : 0);
+    console.log("read_trace verified cache across reload at " + after.budgetBytes + " bytes: " + files.join(", "));
+  }
   if (values.trace) {
     const read = async (args = {}) => {
       const reply = await call("read_trace", { trace: values.trace, ...args });
@@ -45,6 +81,20 @@ try {
     assert.equal(history.droppedEvents, 0);
     const calls = history.events.filter(e => e.type === "call");
     assert.equal(new Set(calls.map(e => e.operationId)).size, 6);
+    for (const schemaVersion of [1, 2, 3, 4]) {
+      const { sessionId, world, netMode, droppedEvents } = history;
+      const sample = { schemaVersion, sessionId, world, netMode, droppedEvents, events: [calls[0]] };
+      if (schemaVersion === 4) sample.bytecodeCache = null;
+      const trace = "00000000-000000-000-" + randomUUID().replaceAll("-", "") + ".json";
+      const filename = path.join(traceDir, trace);
+      await writeFile(filename, JSON.stringify(sample), { flag: "wx" });
+      try {
+        const page = await read({ trace, operationId: calls[0].operationId });
+        assert.deepEqual(page, { trace, ...sample, nextAfterSequence: null });
+      } finally {
+        await rm(filename);
+      }
+    }
     for (const [floor, status] of [[6, "Arrived"], [7, "Rejected"], [1, "Cancelled"]]) {
       const trip = calls.find(event => event.arguments.floor === floor);
       assert.equal(trip.caller.script, "TypedLift.as");
@@ -94,7 +144,7 @@ try {
       return reply.structuredContent;
     };
     const history = await read({ limit: 200 });
-    assert([2, 3].includes(history.schemaVersion));
+    assert([2, 3, 4].includes(history.schemaVersion));
     assert.equal(history.netMode, "listenServer");
     const checkpointId = history.events.find(e => e.type === "checkpointSaved").checkpointId;
     const first = await read({ checkpointId, limit: 2 });
@@ -138,7 +188,7 @@ try {
     const before = await read(writer);
     const after = await read(reader);
     for (const history of [before, after]) {
-      assert.equal(history.schemaVersion, 3);
+      assert([3, 4].includes(history.schemaVersion));
       assert.equal(history.netMode, "listenServer");
       assert.equal(history.droppedEvents, 0);
     }

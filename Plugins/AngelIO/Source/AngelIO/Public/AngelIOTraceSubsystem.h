@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Subsystems/WorldSubsystem.h"
+#include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOTraceSubsystem.generated.h"
 
 class FJsonObject;
@@ -13,6 +14,8 @@ class ANGELIO_API UAngelIOTraceSubsystem : public UWorldSubsystem
     GENERATED_BODY()
 public:
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+    virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+    virtual void PreDeinitialize() override;
     virtual void Deinitialize() override;
     bool Export(FString& OutFile) const;
     void RecordCheckpoint(bool bSaved, const FGuid& CheckpointId, const FString& Stage, int32 Version,
@@ -42,7 +45,8 @@ private:
     TMap<FGuid, FEntry> LiveTargets;
     int64 ForgottenTargets = 0;
 #endif
-    FGuid SessionId;
+    const FGuid SessionId = FGuid::NewGuid();
     FString NetMode;
+    TOptional<FAngelIOBytecodeCacheStats> FinalCache;
     int64 Total = 0;
 };

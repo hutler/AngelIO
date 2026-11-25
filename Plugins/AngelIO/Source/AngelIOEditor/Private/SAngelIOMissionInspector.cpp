@@ -1,4 +1,5 @@
 #include "SAngelIOMissionInspector.h"
+#include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTraceSubsystem.h"
 #include "Dom/JsonObject.h"
@@ -198,6 +199,11 @@ void SAngelIOMissionInspector::Construct(const FArguments&)
             + SVerticalBox::Slot().AutoHeight().Padding(0,3,0,8)
             [ SNew(SComboButton).OnGetMenuContent(this, &SAngelIOMissionInspector::WorldMenu)
                 .ButtonContent()[SNew(STextBlock).Text_Lambda([this]{ return FText::FromString(WorldName(World.Get())); })] ]
+            + SVerticalBox::Slot().AutoHeight().Padding(0,0,0,8)
+            [ SNew(SVerticalBox).Visibility_Lambda([this]{return World.IsValid() ? EVisibility::Visible : EVisibility::Collapsed;})
+                + SVerticalBox::Slot().AutoHeight()[Heading(TEXT("World bytecode cache"))]
+                + SVerticalBox::Slot().AutoHeight()
+                [ SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(BytecodeCacheSummary());}) ] ]
             + SVerticalBox::Slot().AutoHeight()[Heading(TEXT("Mission"))]
             + SVerticalBox::Slot().AutoHeight().Padding(0,3,0,8)
             [ SNew(SComboButton).IsEnabled_Lambda([this]{return World.IsValid();}).OnGetMenuContent(this, &SAngelIOMissionInspector::MissionMenu)
@@ -379,6 +385,23 @@ void SAngelIOMissionInspector::Refresh()
         CollectHistory(*Authority);
         UpdateTimeline();
     }
+}
+
+FString SAngelIOMissionInspector::BytecodeCacheSummary() const
+{
+    UWorld* Source = World.Get();
+    if (!Source) return {};
+    const bool bReplica = Source->GetNetMode() == NM_Client;
+    if (bReplica)
+    {
+        if (!AuthorityMission.IsValid()) return TEXT("Client world · select a server world to inspect its cache.");
+        Source = AuthorityMission->GetWorld();
+    }
+    const auto Cache = AngelIO::GetBytecodeCacheStats(Source);
+    if (!Cache) return TEXT("Waiting for a registered script engine.");
+    return FString::Printf(TEXT("%s%sRetained %llu B / budget %llu B  ·  Hits %llu  ·  Evictions %llu"),
+        bReplica ? TEXT("Server world · ") : TEXT(""), Cache->BudgetBytes == 0 ? TEXT("Disabled · ") : TEXT(""),
+        Cache->RetainedBytes, Cache->BudgetBytes, Cache->Hits, Cache->Evictions);
 }
 
 FString SAngelIOMissionInspector::CheckpointSummary() const

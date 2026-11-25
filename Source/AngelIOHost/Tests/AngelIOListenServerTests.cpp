@@ -506,6 +506,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
     const int32 BudgetKiB = FCString::Atoi(*Parameter);
+    const auto Inspector = SNew(SAngelIOMissionInspector);
     struct FRoom
     {
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
@@ -517,7 +518,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
     const auto Room = MakeShared<FRoom>();
     StartListenSession(TEXT("/Engine/Maps/Entry"), {}, FString::Printf(TEXT("?AngelIOBytecodeCacheKiB=%d"), BudgetKiB));
     const auto Steps = ListenSteps(this);
-    Steps(TEXT("read the runtime cache after the remote player joins"), [this, Room, BudgetKiB]
+    Steps(TEXT("read the runtime cache after the remote player joins"), [this, Room, BudgetKiB, Inspector]
     {
         auto* Host = FindPeer(NM_ListenServer);
         auto* Client = FindPeer(NM_Client);
@@ -527,6 +528,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
         if (!TestTrue(TEXT("Host has a runtime cache"), Stats.IsSet()) ||
             !TestEqual(TEXT("Travel URL selects this world's budget"), Stats->BudgetBytes, uint64(BudgetKiB) * 1024)) return true;
         Room->Before = *Stats;
+        Inspector->SelectWorld(Host);
         Room->Engine = FAngelIOStartupProbe::WorldEngine(Host);
         Room->PersistentModules = FAngelIOStartupProbe::WorldModuleCount(Host);
         Room->Host = LoadLiftRoom(Host, false);
@@ -565,11 +567,28 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             Room->Client->SetShouldBeVisible(true);
             return true;
         });
-        Steps(TEXT("measure the four visible room missions"), [this, Room, BudgetKiB, bReload]
+        Steps(TEXT("measure the four visible room missions"), [this, Room, BudgetKiB, bReload, Inspector]
         {
             if (!Room->Host->IsLevelVisible() || !Room->Client->IsLevelVisible()) return false;
             auto Stats = AngelIO::GetBytecodeCacheStats(Room->Host->GetWorld());
             if (!TestTrue(TEXT("Host runtime stats are available"), Stats.IsSet())) return true;
+            Inspector->Refresh();
+            const FString Expected = FString::Printf(TEXT("Retained %llu B / budget %llu B  ·  Hits %llu  ·  Evictions %llu"),
+                Stats->RetainedBytes, Stats->BudgetBytes, Stats->Hits, Stats->Evictions);
+            TestEqual(TEXT("World view shows live cache totals without selecting a mission"), Inspector->BytecodeCacheSummary(),
+                BudgetKiB ? Expected : TEXT("Disabled · ") + Expected);
+            FString Path, Json;
+            TSharedPtr<FJsonObject> Export;
+            if (!TestTrue(TEXT("Export the live world snapshot"), Room->Host->GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Path) &&
+                FFileHelper::LoadFileToString(Json, *Path) && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Export))) return true;
+            const TSharedPtr<FJsonObject>* Cache = nullptr;
+            if (!TestTrue(TEXT("Trace includes the world's bytecode cache"), Export->TryGetObjectField(TEXT("bytecodeCache"), Cache))) return true;
+            TestEqual(TEXT("Trace memory limit"), (*Cache)->GetNumberField(TEXT("budgetBytes")), double(Stats->BudgetBytes));
+            TestEqual(TEXT("Trace retained heap"), (*Cache)->GetNumberField(TEXT("retainedBytes")), double(Stats->RetainedBytes));
+            TestEqual(TEXT("Trace cumulative hits"), (*Cache)->GetNumberField(TEXT("hits")), double(Stats->Hits));
+            TestEqual(TEXT("Trace cumulative evictions"), (*Cache)->GetNumberField(TEXT("evictions")), double(Stats->Evictions));
+            AddInfo(FString::Printf(TEXT("Cache trace budget_kib=%d phase=%s file=%s"), BudgetKiB,
+                bReload ? TEXT("reload") : TEXT("first"), *FPaths::GetCleanFilename(Path)));
             const uint64 Hits = Stats->Hits - Room->Before.Hits, Builds = Stats->SourceBuilds - Room->Before.SourceBuilds;
             const uint64 Evictions = Stats->Evictions - Room->Before.Evictions;
             TestEqual(TEXT("Four room starts per visit"), Hits + Builds, uint64(4));
@@ -593,7 +612,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             Room->Before = *Stats;
             return true;
         });
-        Steps(TEXT("client receives both lift floors and both panel waits"), [this, Room, bReload]
+        Steps(TEXT("client receives both lift floors and both panel waits"), [this, Room, bReload, Inspector]
         {
             auto* Client = Room->Client->GetWorld();
             if (!AtFloor(Client, 2, 2, bReload ? 0 : 1) || !AtFloor(Client, 3, 3, bReload ? 0 : 1)) return false;
@@ -602,6 +621,12 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             if (!Blink || !Delivery || Blink->GetWaitingSignal() != TEXT("Dispatch") || Delivery->GetWaitingSignal() != TEXT("Dispatch") ||
                 !TripOutput(Blink, TEXT("Pulses"), 0) || !TripOutput(Delivery, TEXT("Stage"), 0)) return false;
             const auto Site = DeliveryPanel(Room->Host.Get())->InspectMission();
+            const FString HostSummary = Inspector->BytecodeCacheSummary();
+            Inspector->SelectWorld(Client);
+            TestTrue(TEXT("Unresolved client selection clears the host counters"), Inspector->BytecodeCacheSummary().StartsWith(TEXT("Client world")));
+            Inspector->SelectMission(Delivery);
+            TestEqual(TEXT("Replicated panel identifies the server cache"), Inspector->BytecodeCacheSummary(), TEXT("Server world · ") + HostSummary);
+            Inspector->SelectWorld(Room->Host->GetWorld());
             TestEqual(TEXT("Delivery wait keeps its source section"), Site.Script, FString(TEXT("Examples/RoomDelivery.as")));
             TestEqual(TEXT("Delivery wait keeps its debug line"), Site.Line, 9);
             const FGuid Instance = Site.Instance;
@@ -619,9 +644,11 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
         });
     }
     EndListenSession();
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Room]
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Room, Inspector]
     {
         TestFalse(TEXT("World teardown releases the engine that owns the cache"), Room->Engine.IsValid());
+        Inspector->Refresh();
+        TestTrue(TEXT("PIE shutdown clears the cache display"), Inspector->BytecodeCacheSummary().IsEmpty());
         return true;
     }));
     return true;

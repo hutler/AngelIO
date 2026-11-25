@@ -189,6 +189,8 @@ Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the dem
 2. Select **FreightLift / Mission**. Its script waits for `MotionFinished` in `Elevator.as`. The operation history follows the same ride that the panel is waiting for. The list includes call arguments, caller and waiter sites, completion status, rejection or cancellation reason, and resumption.
 3. Use the operation picker to pin an earlier ride. Its history remains visible as the live mission advances. Choose **Follow current or latest operation** to resume automatic selection.
 
+**World bytecode cache** shows retained bytes, the memory budget, total hits and total evictions for the selected server world. You can watch the counters while a room unloads and returns without selecting a mission. A resolved client replica shows the same values under **Server world**.
+
 The mission picker lists scripted components in the selected world, including multiple panels on one controller. It groups missions on the selected Outliner actor when its counterpart is available. Selecting a client replica shows its replicated wait alongside the live server VM when the editor can resolve the replica through the in-process IP NetDriver's NetGUID cache. With an external server or another replication backend the client view shows the replicated wait. Select the authoritative PIE world for full inspection.
 
 The tab reads the world's in-memory trace. The timeline reports when older events have been discarded. Game modules can pass the executing component or actor as the optional `TraceTarget` argument to `FAngelIOOperation` to associate calls with the exact selected target, including after a rename. Debug data stays local to the editor process.
@@ -212,7 +214,7 @@ The tab reads the world's in-memory trace. The timeline reports when older event
 | `stateSaved` | A native component committed a value. For a lift, `field` is `floor` and `value` is the floor reached. |
 | `stateRestored` | The component applied a saved value. Its `stateId` matches the same record in the previous host's export. |
 
-Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number and world time in seconds. Operation events carry an `operationId`. Checkpoint events share a `checkpointId` for the same room, component and script across reloads. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
+Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number and world time in seconds. Operation events carry an `operationId`. Checkpoint events share a `checkpointId` for the same room, component and script across reloads. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events or a registered mission engine. Schema 4 includes a world-level `bytecodeCache` snapshot. Compare the exports before and after a room reload to measure changes in `hits` and `evictions`. `retainedBytes` and `budgetBytes` are byte counts at export time. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
 
 ## MCP tools for editors and agents
 
@@ -242,7 +244,7 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
 | `describe_scene` | Saved map actors and mission components by object path, including room-local name bindings and initial inputs |
 | `write_script` | Compiles a proposed source, checks its SHA-256 revision and optionally commits the file. Defaults to a dry run |
-| `read_trace` | Exported mission events, optionally filtered by operation, checkpoint or persisted state ID and paged by sequence number |
+| `read_trace` | World bytecode cache snapshot and mission events, optionally filtered by operation, checkpoint or persisted state ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
 
@@ -263,7 +265,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
 | `HandleLifetimeAndTimeout` | Reassigns a name while a script holds the original lift. Checks a timed wait, eventual arrival, a client request to the replacement, replication and the stale handle's cancellation reason. |
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
-| `StreamedBytecode` | Verifies runtime hits and evictions in a streamed four-mission room with 0, 3 and 32 KiB budgets. [Results and reproduction](Docs/AgentGuide.md#runtime-bytecode-cache) |
+| `StreamedBytecode` | Checks the inspector and trace snapshots on both visits to a four-mission room with 0, 3 and 32 KiB cache budgets. [Results and reproduction](Docs/AgentGuide.md#runtime-bytecode-cache) |
 | `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
 | `MissionCheckpoints` | Interrupts and retries a delivery, reloads both committed stages, checks exactly one arrival and verifies the late client's state and a second room's independent progress. |
 | `CheckpointRestart` | Restarts a host and client on the same slot. Both peers see floor 4 and the cab at its measured fourth-floor position. The mission accepts confirmation with zero new trips or delivery calls. |
