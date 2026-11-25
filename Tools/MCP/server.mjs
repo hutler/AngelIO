@@ -18,7 +18,7 @@ const project = await realpath(values.project);
 const editor = await realpath(values.editor);
 const root = await realpath(path.join(path.dirname(project), "Content", "AngelIO"));
 const exec = promisify(execFile);
-const server = new McpServer({ name: "angelio", version: "0.1.0" });
+const server = new McpServer({ name: "angelio", version: "0.3.0" });
 const annotations = { readOnlyHint: true, openWorldHint: false };
 
 function result(data) {
