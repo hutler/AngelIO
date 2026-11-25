@@ -270,6 +270,8 @@ To exercise the MCP tools with a real stdio client, use the same `$editor` path 
 
 The release guide includes measured startup, memory and frame cost for 1–1000 waiting missions and commands to build and launch the Win64 Development and Shipping packages. [Release checks](Docs/AgentGuide.md#win64-release-and-scaling-checks)
 
+For 1000 instances of the same mission, the guide also breaks down actor creation, API registration, compilation and VM startup, and measures the saving from loading bytecode. [Startup profile](Docs/AgentGuide.md#where-startup-time-goes)
+
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor
 ```

@@ -12,6 +12,12 @@
 #include "Misc/Paths.h"
 #include <string_view>
 #include <algorithm>
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+#include "Tests/AngelIOStartupProbe.h"
+#define ANGELIO_BENCHMARK_MARK(Field) FAngelIOStartupProbe::Mark(&FAngelIOStartupProbe::Field)
+#else
+#define ANGELIO_BENCHMARK_MARK(Field) do {} while (false)
+#endif
 
 THIRD_PARTY_INCLUDES_START
 #include "angelscript.h"
@@ -740,6 +746,7 @@ void FAngelIOProgram::DetachComponent()
 
 bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
 {
+    ANGELIO_BENCHMARK_MARK(FileBegin);
     const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("AngelIO"));
     FString Path = FPaths::ConvertRelativePathToFull(Root, RelativeScript);
     FString Source;
@@ -755,9 +762,11 @@ bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
 
 bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
 {
+    ANGELIO_BENCHMARK_MARK(CompileBegin);
     Impl = MakeUnique<FImpl>();
     auto& S = *Impl;
     S.Engine = asCreateScriptEngine();
+    ANGELIO_BENCHMARK_MARK(EngineCreated);
     S.ScriptSection = Label;
 #if WITH_EDITOR
     TArray<FAngelIOMapLookup> MapLookups{{TEXT("SendTo"), nullptr, false}};
@@ -780,6 +789,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
         S.Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
         return S.Fail(TEXT("Could not register AngelIO script API"));
+    ANGELIO_BENCHMARK_MARK(CoreRegistered);
     auto& Engine = *S.Engine;
     const auto FirstFunction = Engine.GetGlobalFunctionCount();
     const auto FirstType = Engine.GetObjectTypeCount();
@@ -820,6 +830,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
         S.ExternalAPI.Add(FString::Printf(TEXT("enum %s { %s }"),
             UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)), *FString::Join(Names, TEXT(", "))));
     }
+    ANGELIO_BENCHMARK_MARK(ProvidersInspected);
     S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
     FString WrapperSource;
     for (const auto& Wrapper : Wrappers)
@@ -833,7 +844,12 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     FTCHARToUTF8 SourceBytes(*Source);
     S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
     if (S.Module->AddScriptSection(TCHAR_TO_UTF8(*Label), SourceBytes.Get(), SourceBytes.Length()) < 0 ||
-        S.Module->Build() < 0 || !S.Inspect())
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+        FAngelIOStartupProbe::Build(*S.Module) < 0 ||
+#else
+        S.Module->Build() < 0 ||
+#endif
+        !S.Inspect())
     {
         S.Status = EAngelIOState::Failed;
         return false;
@@ -843,6 +859,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     S.ReadMapTargets({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())}, MapLookups);
     S.ReadPortDefaults({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
 #endif
+    ANGELIO_BENCHMARK_MARK(CompileEnd);
     return true;
 }
 
@@ -868,7 +885,9 @@ bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* 
     }
     if (S.Context->Prepare(S.Module->GetFunctionByDecl("void Run()")) < 0)
         return S.Fail(TEXT("Could not prepare Run"));
-    return S.Execute();
+    const bool bStarted = S.Execute();
+    ANGELIO_BENCHMARK_MARK(StartEnd);
+    return bStarted;
 }
 
 bool FAngelIOProgram::SetInput(const FString& Name, const FAngelIOValue& Value)

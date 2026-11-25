@@ -193,6 +193,7 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
 | `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart`, `BlinkBranches` and `PartitionLanding` using networked PIE |
 | `AngelIO.Performance.WaitingMissions` | Startup, process resident-memory growth and baseline/loaded frame time for 1, 100 and 1000 independently ticking mission components |
+| `AngelIO.Performance.MissionStartup` | Paired startup measurements for 1000 instances of the same script, with per-phase timings and a bytecode reuse experiment |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 To verify a process restart, run the automation command above twice with the filter `AngelIO.Network.ListenServer.CheckpointRestart`. Generate a fresh GUID with `[guid]::NewGuid()`. Add `-AngelIORestartTestWrite=<guid>` to the first editor invocation and `-AngelIORestartTestRead=<guid>` to the second. The first host delivers to floor 4 and exits. The second host restores `Delivered` and accepts confirmation. The test checks floor 4, the physical cab position and zero new trips on both peers, and zero delivery calls in the new host's trace. Successful completion removes the isolated test slot.
@@ -224,7 +225,31 @@ if ($LASTEXITCODE -ne 0) { throw 'MCP smoke test failed' }
 | 100 | 48.41 | 7.65 | 0.066 | 0.066 |
 | 1000 | 484.10 | 87.39 | 0.073 | 0.395 |
 
-These figures include actor creation and editor tracing. The memory delta reflects process allocation and reuse. With 1000 waiting missions the additional tick cost was about 0.32 ms. Keep the current tick model for this workload. For levels that activate hundreds of missions in one frame, profile compiler time separately from actor spawning before introducing a bytecode cache.
+These figures include actor creation and editor tracing. The memory delta reflects process allocation and reuse. With 1000 waiting missions the additional tick cost was about 0.32 ms. Keep the current tick model for this workload.
+
+#### Where startup time goes
+
+`AngelIO.Performance.MissionStartup` starts 1000 actors running `Examples/TimedGate.as` through component registration and `BeginPlay`. Each mission gets its own AngelScript engine, module, globals and execution context. The source cohort builds every module. In the bytecode cohort the first mission builds and saves the module with debug information (471 bytes in this run), then the other 999 load those bytes from memory. Both cohorts read the file, register the same native API and inspect the mission contract on every start.
+
+These are arithmetic means in milliseconds per 1000 starts over six paired runs on UE 5.8.4 Win64 Development Editor, NullRHI, Ryzen 9 7845HX. The test warms both paths on eight instances each, creates a fresh game world for each cohort, alternates which cohort runs first and excludes world creation, teardown and assertions. Running the original `WaitingMissions` test in the same editor session gave 497.3 ms, compared with 484.1 ms in the earlier release.
+
+| Synchronous work for 1000 missions | Build from source (ms) | Reuse bytecode (ms) |
+| --- | ---: | ---: |
+| Spawn actors | 29.5 | 28.6 |
+| Resolve the script path and read the file | 52.5 | 51.4 |
+| Create the AngelScript engines and program storage | 40.0 | 39.9 |
+| Register the standard string type and AngelIO core API | 154.8 | 153.8 |
+| Register external providers and collect their API declarations | 70.6 | 69.9 |
+| Prepare the module and source sections, including wrappers | 14.4 | 14.7 |
+| Build or load the module | 88.9 | 36.1 |
+| Inspect the contract and editor metadata | 6.7 | 5.9 |
+| Initialize the VM, apply inputs and run to the first wait | 34.5 | 33.5 |
+| Component creation, registration, state publication and loop overhead | 15.2 | 15.0 |
+| **Total** | **507.2** | **448.6** |
+
+On the source path, `CompileFile` accounted for 428.0 ms including file access. The SDK's `Build()` itself accounted for 88.9 ms. Reusing bytecode saved 52.8 ms inside the module step and 58.6 ms end to end (11.6%, with savings of 54.5–63.2 ms across pairs). The largest cost was repeating core and provider registration and collecting declarations, at 225.5 ms. Defer a persistent bytecode cache for this short mission. The next experiment should measure reusing those registrations while keeping per-mission globals, waits and debugger locations independent. A level with longer scripts can rerun the comparison with its own workload.
+
+To reproduce, use the Unreal Automation command above with `$filter = 'AngelIO.Performance.'`. Each `AngelIO startup pair=` log entry includes the phase timings, build and load counts, and bytecode size. The test checks the waiting state and initial output of every instance and verifies that the first and last retain separate mission IDs and the same valid source line. The bytecode path exists only in editor automation.
 
 `AngelIO.Network.ListenServer.PartitionLanding` uses the small partitioned map `/Game/Tests/PartitionLift`. The host and client move close enough to load the freight lift, ride to floor 4, leave its cell, and return. The test checks removal from the registry, restored physical height and zero new trips. The read half of `LandedBeforeDeliveredRestart` also connects a late client after the new server is already waiting for confirmation.
 
