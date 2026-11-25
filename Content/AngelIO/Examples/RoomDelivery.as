@@ -13,8 +13,8 @@ void Run()
     if (stage == "Dispatched")
     {
         Lift@ lift = WaitActor("FreightLift");
-        TripResult@ ride = lift.MoveTo(4, 800.0f).Wait();
-        if (ride.Status != TripStatus::Arrived)
+        // The landing for this dispatch can reach disk before the mission saves Delivered.
+        if (!lift.HasSavedArrival(4) && lift.MoveTo(4, 800.0f).Wait().Status != TripStatus::Arrived)
             return;
         SaveCheckpoint("Delivered", 1);
         stage = "Delivered";

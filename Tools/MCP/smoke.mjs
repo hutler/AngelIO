@@ -124,7 +124,7 @@ try {
   }
   if (values["landing-write-trace"] || values["landing-read-trace"]) {
     const writer = values["landing-write-trace"], reader = values["landing-read-trace"];
-    assert(writer && reader, "Pass the exports from both halves of CheckpointRestart");
+    assert(writer && reader, "Pass both restart exports for a completed landing");
     const read = async (trace, args = {}) => {
       const response = await call("read_trace", { trace, ...args });
       assert(!response.isError, JSON.stringify(response.content));
@@ -150,7 +150,21 @@ try {
     assert(events.every(e => e.stateId === stateId && e.target === "FreightLift" && e.field === "floor" && e.component));
     assert.equal(restored.nextAfterSequence, null);
     assert(after.events.some(e => e.type === "stateRestored" && e.value === 3 && e.stateId !== stateId));
-    assert(!after.events.some(e => e.operation === "Lift.MoveTo"));
+    assert(!after.events.some(e => e.operation === "Lift.MoveTo" || e.status === "Arrived"));
+    const stages = before.events.filter(e => e.type === "checkpointSaved");
+    if (stages.at(-1)?.stage === "Dispatched") {
+      assert.equal(stages.length, 1);
+      const dispatch = stages[0];
+      const calls = before.events.filter(e => e.operation === "Lift.MoveTo");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].caller.instanceId, dispatch.savedByInstanceId);
+      assert.deepEqual(before.events.filter(e => e.status === "Arrived").map(e => e.operationId), [calls[0].operationId]);
+      const recovery = (await read(reader, { checkpointId: dispatch.checkpointId })).events;
+      assert.deepEqual(recovery.map(e => [e.type, e.stage]), [["checkpointRestored", "Dispatched"], ["checkpointSaved", "Delivered"]]);
+      assert.equal(recovery[0].savedByInstanceId, dispatch.savedByInstanceId);
+      assert.notEqual(recovery[1].savedByInstanceId, dispatch.savedByInstanceId);
+      console.log("read_trace verified recovery between the landing and Delivered commits");
+    }
     assert((await call("read_trace", { trace: reader, stateId, operationId: stateId })).isError);
     console.log("read_trace verified the saved and restored floor across listen-server processes: " + stateId);
   }
@@ -158,6 +172,7 @@ try {
   const api = (await call("describe_api")).structuredContent;
   assert.equal(api.entry, "void Run()");
   assert(api.externalDeclarations.some(s => s.includes("Lift::MoveTo(int floor, float speed)")));
+  assert(api.externalDeclarations.some(s => s.includes("Lift::HasSavedArrival(int floor)")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait()")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait(float")));
   assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name)"));

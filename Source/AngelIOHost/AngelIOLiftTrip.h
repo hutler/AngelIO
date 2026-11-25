@@ -9,5 +9,6 @@ struct FLiftTrip : public FAngelIOOperation
     FLiftTrip(UWorld* World, const FString& Target, int32 InFloor, float Speed, const UObject* TraceTarget = nullptr);
     void Finish(ELiftTripStatus InStatus, const FString& Reason = {});
     const int32 Floor;
+    FGuid CheckpointStepId;
     ELiftTripStatus Status = ELiftTripStatus::Rejected;
 };

@@ -30,6 +30,9 @@ struct FAngelIOScriptWrapper
 namespace AngelIO
 {
     ANGELIO_API UWorld* GetScriptWorld();
+    // Identity of the last saved or matching loaded checkpoint (writer, version and stage).
+    // Invalid outside a mission or after a checkpoint lookup misses.
+    ANGELIO_API FGuid GetCheckpointStepId();
     // A completed operation returns inline. A pending operation suspends Run.
     ANGELIO_API void AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FString& Label);
     // One outcome per reader. An empty timeout waits indefinitely; zero polls.

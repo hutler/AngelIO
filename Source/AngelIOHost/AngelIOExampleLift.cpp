@@ -39,7 +39,9 @@ bool AAngelIOExampleLift::LoadLanding(TOptional<int32>& Floor, FString& Error)
     TArray<uint8> Bytes;
     if (!Mission->LoadComponentState(LandingKey, Bytes, Error)) return false;
     if (Bytes.IsEmpty()) return true;
-    if (Bytes.Num() != sizeof(int32) + sizeof(double))
+    // Older and untracked landings contain only the floor and placement-relative height.
+    constexpr int32 LandingSize = sizeof(int32) + sizeof(double);
+    if (Bytes.Num() != LandingSize && Bytes.Num() != LandingSize + sizeof(FGuid))
     {
         Error = TEXT("Invalid saved lift landing size");
         return false;
@@ -48,6 +50,7 @@ bool AAngelIOExampleLift::LoadLanding(TOptional<int32>& Floor, FString& Error)
     int32 LandedFloor = 0;
     double OffsetZ = 0;
     Reader << LandedFloor << OffsetZ;
+    if (!Reader.AtEnd()) Reader << SavedLandingStepId;
     if (Reader.IsError() || !Reader.AtEnd() || !FMath::IsFinite(OffsetZ))
     {
         Error = TEXT("Invalid saved lift landing");
@@ -57,6 +60,7 @@ bool AAngelIOExampleLift::LoadLanding(TOptional<int32>& Floor, FString& Error)
     Location.Z = PlacementZ + OffsetZ;
     SetActorLocation(Location, false, nullptr, ETeleportType::TeleportPhysics);
     Floor = LandedFloor;
+    SavedLandingFloor = LandedFloor;
     Mission->ReportPersistedInteger(EAngelIOStateChange::Restored, LandingKey, Address->GetTargetName(), TEXT("floor"), LandedFloor);
     return true;
 }
@@ -67,6 +71,7 @@ void AAngelIOExampleLift::BeginPlay()
     TOptional<int32> RestoredFloor;
     if (bServer)
     {
+        SavedLandingStepId.Invalidate();
         if (const auto* Stream = FLevelUtils::FindStreamingLevel(GetLevel()))
         {
             if (StartPositionInLevel.IsSet())
@@ -118,7 +123,12 @@ bool AAngelIOExampleLift::IsReadyForTrip() const
     return HasActorBegunPlay() && !ActiveTrip && Mission->GetWaitingSignal() == TEXT("RequestFloor");
 }
 
-TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed, FName Target)
+bool AAngelIOExampleLift::HasSavedArrival(int32 Floor, FGuid CheckpointStepId) const
+{
+    return CheckpointStepId.IsValid() && CheckpointStepId == SavedLandingStepId && Floor == SavedLandingFloor;
+}
+
+TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed, FName Target, FGuid CheckpointStepId)
 {
     if (Target.IsNone()) Target = Address->GetTargetName();
     auto Trip = MakeShared<FLiftTrip>(GetWorld(), Target.IsNone() ? GetName() : Target.ToString(), Floor, TravelSpeed, Mission);
@@ -141,6 +151,7 @@ TSharedRef<FLiftTrip> AAngelIOExampleLift::MoveTo(int32 Floor, float TravelSpeed
         Trip->Finish(ELiftTripStatus::Rejected, TEXT("MissingSpeedInput"));
         return Trip;
     }
+    Trip->CheckpointStepId = CheckpointStepId;
     ActiveTrip = Trip;
     RequestFloor(Floor);
     Override.Float = 0;
@@ -219,6 +230,8 @@ void AAngelIOExampleLift::FinishMotion()
         FMemoryWriter Writer(Bytes);
         double OffsetZ = DestinationZ - PlacementZ;
         Writer << DestinationFloor << OffsetZ;
+        FGuid StepId = ActiveTrip ? ActiveTrip->CheckpointStepId : FGuid();
+        if (StepId.IsValid()) Writer << StepId;
         FString Error;
         if (!Mission->SaveComponentState(LandingKey, Bytes, Error))
         {
@@ -228,6 +241,8 @@ void AAngelIOExampleLift::FinishMotion()
             Mission->StopScript();
             return;
         }
+        SavedLandingFloor = DestinationFloor;
+        SavedLandingStepId = StepId;
         Mission->ReportPersistedInteger(EAngelIOStateChange::Saved, LandingKey, Address->GetTargetName(), TEXT("floor"), DestinationFloor);
     }
     Mission->SendSignal(TEXT("MotionFinished"), DestinationFloor);

@@ -790,6 +790,8 @@ void FAngelIOCheckpointRestart::GetTests(TArray<FString>& Names, TArray<FString>
     Commands.Add(TEXT("Delivered"));
     Names.Add(TEXT("MidRideRestart"));
     Commands.Add(TEXT("Dispatched"));
+    Names.Add(TEXT("LandedBeforeDeliveredRestart"));
+    Commands.Add(TEXT("LandedBeforeDelivered"));
 }
 
 bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
@@ -803,7 +805,9 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
     if ((bWriteOnly || bReadOnly) && !TestTrue(TEXT("Pass one restart phase with a test GUID"),
         bWriteOnly != bReadOnly && FGuid::Parse(Token, TestId))) return false;
     const bool bMidRide = InitialStage == TEXT("Dispatched");
-    const FString Slot = (bMidRide ? TEXT("MidRideTest-") : TEXT("RestartTest-")) + TestId.ToString();
+    const bool bLandedBeforeDelivered = InitialStage == TEXT("LandedBeforeDelivered");
+    const TCHAR* SlotPrefix = bLandedBeforeDelivered ? TEXT("LandedTest-") : bMidRide ? TEXT("MidRideTest-") : TEXT("RestartTest-");
+    const FString Slot = SlotPrefix + TestId.ToString();
     const FString File = FPaths::ProjectSavedDir() / TEXT("AngelIO/Checkpoints/PIE") / (TEXT("slot-") + Slot + TEXT(".sqlite3"));
     if (!TestEqual(TEXT("Only the read phase starts with an existing test slot"), FPaths::FileExists(File), bReadOnly)) return false;
     const auto Steps = ListenSteps(this);
@@ -813,6 +817,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
         FGuid CheckpointId;
         FVector FloorFourLocation;
         TStrongObjectPtr<UAngelIOTestSignalObserver> Motion{NewObject<UAngelIOTestSignalObserver>()};
+        TStrongObjectPtr<UAngelIOTestSignalObserver> ClientMotion{NewObject<UAngelIOTestSignalObserver>()};
     };
     const auto Session = MakeShared<FSession>();
     auto Start = [&]
@@ -833,12 +838,21 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
             TestTrue(TEXT("Both peers created their streamed room"), Session->Host.IsValid() && Session->Client.IsValid());
             return true;
         });
-        Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session, bMidRide]
+        Steps(TEXT("start the placed delivery script when the room becomes visible"), [Session, bMidRide, bLandedBeforeDelivered]
         {
             auto* Panel = DeliveryPanel(Session->Host.Get());
             auto* FreightAddress = DeliveryPanel(Session->Host.Get(), 2);
             if (!Panel || !FreightAddress || !Session->Client->GetLoadedLevel()) return false;
             auto* Freight = CastChecked<AAngelIOExampleLift>(FreightAddress->GetOwner());
+            if (bLandedBeforeDelivered)
+            {
+                auto* ClientAddress = DeliveryPanel(Session->Client.Get(), 2);
+                if (!ClientAddress) return false;
+                Session->Motion->GameplayEvents = 0;
+                Session->ClientMotion->Presentations = 0;
+                Observe(Freight->Mission, Session->Motion.Get());
+                Observe(CastChecked<AAngelIOExampleLift>(ClientAddress->GetOwner())->Mission, Session->ClientMotion.Get());
+            }
             if (bMidRide)
             {
                 // Leave enough network frames to observe both peers strictly between landings.
@@ -925,12 +939,19 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
     if (!bReadOnly)
     {
         Start();
-        Steps(TEXT("dispatch exactly one delivery"), [this, Session]
+        Steps(TEXT("dispatch exactly one delivery"), [this, Session, bLandedBeforeDelivered]
         {
             auto* Client = DeliveryPanel(Session->Client.Get());
             if (!Client || Client->GetWaitingSignal() != TEXT("Dispatch")) return false;
             if (!AtFloor(FindPeer(NM_Client), 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 3, 3, 1)) return false;
-            TestTrue(TEXT("Dispatch accepted"), DeliveryPanel(Session->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
+            auto* Panel = DeliveryPanel(Session->Host.Get());
+            TestTrue(TEXT("Dispatch accepted"), Panel->SendSignal(TEXT("Dispatch"), 0));
+            if (bLandedBeforeDelivered)
+            {
+                TestEqual(TEXT("Writer is awaiting the dispatched ride"), Panel->GetWaitingSignal(), FString(TEXT("LiftTrip.Wait")));
+                // Let the executor land and replicate while the caller cannot consume the completed trip.
+                Panel->SetComponentTickEnabled(false);
+            }
             return true;
         });
         if (bMidRide)
@@ -957,6 +978,21 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
                     *Info.Operation.ToString(), FindLift(Host, 2)->GetActorLocation().Z,
                     FindLift(FindPeer(NM_Client), 2)->GetActorLocation().Z, StartZ));
                 GEditor->RequestEndPlayMap();
+                return true;
+            });
+        }
+        else if (bLandedBeforeDelivered)
+        {
+            Steps(TEXT("landing is durable while the delivery checkpoint is still Dispatched"), [this, Session, BothAtFloorFour, CheckHistory, CheckLanding]
+            {
+                if (!BothAtFloorFour(2) || !Session->ClientMotion->Presentations) return false;
+                auto* Panel = DeliveryPanel(Session->Host.Get());
+                TestEqual(TEXT("Only Dispatched reached the mission store"), Panel->InspectMission().SavedStage, FString(TEXT("Dispatched")));
+                TestEqual(TEXT("Caller has not consumed the completed operation"), Panel->GetWaitingSignal(), FString(TEXT("LiftTrip.Wait")));
+                TestEqual(TEXT("One original arrival on the server"), Session->Motion->GameplayEvents, 1);
+                TestEqual(TEXT("One original arrival on the client"), Session->ClientMotion->Presentations, 1);
+                CheckHistory(1, TEXT("checkpointSaved"), TEXT("Dispatched"));
+                CheckLanding(false);
                 return true;
             });
         }
@@ -996,6 +1032,36 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
                 AddInfo(FString::Printf(TEXT("Automatic retry: departure Z=%.1f, floor 4 host %s, client %s, one arrival"),
                     Session->Motion->DepartureForFloorFour->Z,
                     *FindLift(Host, 2)->GetActorLocation().ToString(), *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
+                return true;
+            });
+        }
+        else if (bLandedBeforeDelivered)
+        {
+            Steps(TEXT("recover the committed landing and wait for Confirm on both peers"), [this, Session, BothAtFloorFour, CheckHistory, CheckLanding]
+            {
+                auto* Panel = DeliveryPanel(Session->Host.Get());
+                auto* Client = DeliveryPanel(Session->Client.Get());
+                if (!Panel || !Client || Client->GetWaitingSignal() != TEXT("Confirm") ||
+                    !TripOutput(Client, TEXT("Stage"), 1) || !BothAtFloorFour(0)) return false;
+                TestEqual(TEXT("Server waits for confirmation"), Panel->GetWaitingSignal(), FString(TEXT("Confirm")));
+                const auto Info = Panel->InspectMission();
+                TestEqual(TEXT("Recovered an outstanding dispatch"), Info.RestoredStage, FString(TEXT("Dispatched")));
+                TestEqual(TEXT("Recovered arrival advances the on-disk stage"), Info.SavedStage, FString(TEXT("Delivered")));
+                CheckHistory(0, TEXT("checkpointRestored"), TEXT("Dispatched"));
+                CheckHistory(0, TEXT("checkpointSaved"), TEXT("Delivered"));
+                CheckLanding(true);
+                auto* Trace = FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>();
+                TestEqual(TEXT("Recovery trace has no gaps"), Trace->GetDroppedEventCount(), int64(0));
+                Trace->VisitEvents([this](const FJsonObject& Event, const UObject*)
+                {
+                    FString Operation, Status;
+                    TestFalse(TEXT("No MoveTo in the new server trace"), Event.TryGetStringField(TEXT("operation"), Operation) && Operation == TEXT("Lift.MoveTo"));
+                    TestFalse(TEXT("No Arrived in the new server trace"), Event.TryGetStringField(TEXT("status"), Status) && Status == TEXT("Arrived"));
+                });
+                TestEqual(TEXT("No repeat gameplay arrival"), Session->Motion->GameplayEvents, 0);
+                TestEqual(TEXT("No repeat client arrival presentation"), Session->ClientMotion->Presentations, 0);
+                AddInfo(FString::Printf(TEXT("Recovered Dispatched -> Delivered, waiting for Confirm; client floor 4 at %s, zero trips and zero arrivals"),
+                    *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
                 return true;
             });
         }

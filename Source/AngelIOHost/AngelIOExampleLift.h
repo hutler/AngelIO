@@ -32,7 +32,8 @@ public:
     UFUNCTION(BlueprintCallable, Category="Demo")
     bool RequestFloor(int32 Floor);
     bool IsReadyForTrip() const;
-    TSharedRef<FLiftTrip> MoveTo(int32 Floor, float TravelSpeed, FName Target = NAME_None);
+    TSharedRef<FLiftTrip> MoveTo(int32 Floor, float TravelSpeed, FName Target = NAME_None, FGuid CheckpointStepId = {});
+    bool HasSavedArrival(int32 Floor, FGuid CheckpointStepId) const;
     uint64 GetPlayGeneration() const { return PlayGeneration; }
 
     virtual void BeginPlay() override;
@@ -50,6 +51,8 @@ private:
     bool LoadLanding(TOptional<int32>& Floor, FString& Error);
 
     TSharedPtr<FLiftTrip> ActiveTrip;
+    FGuid SavedLandingStepId;
+    int32 SavedLandingFloor = 0;
     uint64 PlayGeneration = 0;
     TOptional<FVector> StartPositionInLevel;
 

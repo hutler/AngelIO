@@ -36,6 +36,7 @@ namespace
         TWeakObjectPtr<UWorld> World;
         TWeakObjectPtr<UActorComponent> Component;
         FGuid InstanceId;
+        FGuid CheckpointStepId;
         TSharedPtr<FAngelIOOperation> Pending;
         TSharedPtr<FConditionWait> Condition;
         TSharedPtr<EAngelIOWaitOutcome> WaitOutcome;
@@ -152,6 +153,13 @@ UWorld* AngelIO::GetScriptWorld()
     auto* Context = asGetActiveContext();
     auto* Scope = Context ? static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey)) : nullptr;
     return Scope ? Scope->World.Get() : nullptr;
+}
+
+FGuid AngelIO::GetCheckpointStepId()
+{
+    auto* Context = asGetActiveContext();
+    auto* Scope = Context ? static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey)) : nullptr;
+    return Scope ? Scope->CheckpointStepId : FGuid();
 }
 
 void AngelIO::AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FString& Label)
@@ -433,8 +441,17 @@ struct FAngelIOProgram::FImpl
                 Context->SetException(TCHAR_TO_UTF8(*Error));
                 return;
             }
-            if (Record.Version != Version) return;
+            if (Record.Version != Version)
+            {
+                Self->Scope.CheckpointStepId.Invalidate();
+                return;
+            }
             Result->assign(reinterpret_cast<const char*>(*Record.Stage), Record.Stage.Len());
+        }
+        Self->Scope.CheckpointStepId = FGuid::NewDeterministicGuid(FString::Printf(TEXT("%s/%d/%s"),
+            *Record.SavedBy.ToString(), Version, *FString(Record.Stage)));
+        if (!bSave)
+        {
             // Only the first matching read from an earlier run establishes this run's restore point.
             if (Self->RestoredVersion || Record.SavedBy == Self->Scope.InstanceId) return;
             Self->RestoredVersion = Version;

@@ -93,14 +93,25 @@ namespace
             [World, Name] { return ResolveLift(World.Get(), Name, true) != nullptr; });
     }
 
+    AAngelIOExampleLift* GetCurrentLift(const FNamedLift& Handle)
+    {
+        auto* Lift = Handle.Actor.Get();
+        return Lift && Lift->GetPlayGeneration() == Handle.PlayGeneration ? Lift : nullptr;
+    }
+
+    void HasSavedArrival(asIScriptGeneric* Call)
+    {
+        const auto* Lift = GetCurrentLift(static_cast<FLiftHandle*>(Call->GetObject())->Value);
+        Call->SetReturnByte(Lift && Lift->HasSavedArrival(static_cast<int32>(Call->GetArgDWord(0)), AngelIO::GetCheckpointStepId()));
+    }
+
     void MoveLift(asIScriptGeneric* Call)
     {
         const auto& Handle = static_cast<FLiftHandle*>(Call->GetObject())->Value;
-        auto* Lift = Handle.Actor.Get();
-        if (Lift && Lift->GetPlayGeneration() != Handle.PlayGeneration) Lift = nullptr;
+        auto* Lift = GetCurrentLift(Handle);
         const int32 Floor = static_cast<int32>(Call->GetArgDWord(0));
         const float Speed = Call->GetArgFloat(1);
-        auto Trip = Lift ? Lift->MoveTo(Floor, Speed, Handle.Target) :
+        auto Trip = Lift ? Lift->MoveTo(Floor, Speed, Handle.Target, AngelIO::GetCheckpointStepId()) :
             MakeShared<FLiftTrip>(AngelIO::GetScriptWorld(), Handle.Target.ToString(), Floor, Speed);
         if (!Lift) Trip->Finish(ELiftTripStatus::Cancelled, TEXT("TargetGone"));
         Call->SetReturnAddress(new FTripHandle({Trip, nullptr}));
@@ -165,6 +176,7 @@ public:
             Engine.RegisterEnumValue("TripStatus", "TimedOut", TimedOutResult) >= 0 &&
             Engine.RegisterGlobalFunction("Lift@ FindLift(const string &in name)", asFUNCTION(FindNamedLift), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("Lift", "LiftTrip@ MoveTo(int floor, float speed)", asFUNCTION(MoveLift), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("Lift", "bool HasSavedArrival(int floor) const", asFUNCTION(HasSavedArrival), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "TripResult@ Wait() const", asFUNCTION(WaitForTrip), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "TripResult@ Wait(float timeoutSeconds) const", asFUNCTION(WaitForTrip), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("LiftTrip", "string get_Id() const property", asFUNCTION(TripId), asCALL_GENERIC) >= 0 &&

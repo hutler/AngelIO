@@ -71,6 +71,19 @@ bool FAngelIOCheckpointContract::RunTest(const FString&)
         FString::Join(Stages, TEXT(", ")), FString(TEXT("checkpointSaved Arrived v1, checkpointRestored Arrived v1, ")
             TEXT("checkpointSaved AtDock v2, checkpointRestored AtDock v2")));
 #endif
+    Lift->bPersistLanding = true;
+    Lift->Address->SetTargetName(TEXT("Freight"));
+    const TCHAR* Delivery = TEXT("Delivery.as");
+    TestTrue(TEXT("A same-floor trip records the requesting checkpoint step"), Run(Delivery, Lift->Address,
+        TEXT(R"(SaveCheckpoint("Dispatched"); Lift@ lift = FindLift("Freight");
+            out_Ok = !lift.HasSavedArrival(1) && lift.MoveTo(1, 800).Wait().Status == TripStatus::Arrived
+                && lift.HasSavedArrival(1) && !lift.HasSavedArrival(4);)")));
+    TestTrue(TEXT("Another component's dispatch cannot claim the landing"), Run(Delivery, Lift->Mission,
+        TEXT(R"(SaveCheckpoint("Dispatched"); out_Ok = !FindLift("Freight").HasSavedArrival(1);)")));
+    TestTrue(TEXT("Only a matching checkpoint read recovers the landing"), Run(Delivery, Lift->Address,
+        TEXT(R"(Lift@ lift = FindLift("Freight"); out_Ok = LoadCheckpoint() == "Dispatched" && lift.HasSavedArrival(1);
+            out_Ok = out_Ok && LoadCheckpoint(2) == "" && !lift.HasSavedArrival(1);
+            SaveCheckpoint("Next"); out_Ok = out_Ok && !lift.HasSavedArrival(1);)")));
     return true;
 }
 
