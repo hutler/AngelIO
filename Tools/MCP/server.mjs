@@ -18,7 +18,8 @@ const project = await realpath(values.project);
 const editor = await realpath(values.editor);
 const root = await realpath(path.join(path.dirname(project), "Content", "AngelIO"));
 const exec = promisify(execFile);
-const server = new McpServer({ name: "angelio", version: "0.3.0" });
+const { version } = JSON.parse(await readFile(new URL("./package.json", import.meta.url), "utf8"));
+const server = new McpServer({ name: "angelio", version });
 const annotations = { readOnlyHint: true, openWorldHint: false };
 
 function result(data) {

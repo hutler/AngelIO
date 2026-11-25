@@ -14,6 +14,7 @@ AngelIO is a Win64 Unreal Engine plugin for writing level missions in AngelScrip
 
 ## Project workflow
 
+- Bump AngelIO's version in every submission, in the same commit as the change. Increment the integer `Version` in `AngelIO.uplugin` and keep `VersionName`, the MCP package and its lockfile in sync. Use a patch bump for fixes and a minor bump for new features.
 - On a fresh clone with no local Beads database, run `bd bootstrap --yes` from the repository root, then `bd ready`. Bootstrap reads the project's sync configuration and sets up the local Dolt store. If `bd ready` already works, continue with that workspace.
 - Track work in Beads. Run `bd prime` to recover context, `bd ready` to find available work, and `bd show <id>` before claiming it with `bd update <id> --claim`. For a new request, create an issue with `bd create`. Record enduring project knowledge with `bd remember`. Close completed work with `bd close <id> --reason "..."`.
 - Keep game-specific types and rules in the game module. The plugin owns mission execution, addressing, replication of public state, and generic operation tracing. The editor module owns the inspector and validation commandlet.
