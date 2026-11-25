@@ -1570,9 +1570,16 @@ bool FAngelIOSharedInspectorPIE::RunTest(const FString&)
         Panels->Replica = PC->TripPanel.Get();
         {
             FAngelIOStartupProbe Probe;
+            Probe.bReuseBytecode = true;
             TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
+            {
+                FAngelIOProgram Seed;
+                if (!TestTrue(TEXT("Build the panels' script once"), Seed.CompileFile(Panels->Local->Script, Host))) return true;
+            }
             if (!TestTrue(TEXT("Both panels started"), Panels->Local->StartScript() && Panels->Remote->StartScript()) ||
-                !TestEqual(TEXT("Restarted panels reuse the world's registered API"), Probe.Registrations, 0)) return true;
+                !TestEqual(TEXT("Restarted panels reuse the world's registered API"), Probe.Registrations, 0) ||
+                !TestEqual(TEXT("One source build"), Probe.Builds, 1) ||
+                !TestEqual(TEXT("Both inspected panels loaded bytecode"), Probe.Loads, 2)) return true;
             Panels->Engine = FAngelIOStartupProbe::WorldEngine(Host);
         }
         PC->LiftTrip(4, 200);

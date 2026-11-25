@@ -276,6 +276,8 @@ For 1000 instances of the same mission, the guide also breaks down actor creatio
 
 The v0.6.3 editor experiment reduced mean startup time for those 1000 missions from 488.9 to 237.6 ms by registering the API once. Runtime mission components use world-owned registration by default from v0.7.0. [Shared registration results](Docs/AgentGuide.md#registering-the-api-once-for-1000-missions)
 
+On the world engine, compiling `TimedGate.as` once and loading its bytecode for the other 999 actors cut mean startup from **248.1 to 190.8 ms (23.1%)** in the v0.7.1 editor experiment. The v0.7.0 tag measured 248.4 ms on the same machine. [Benchmark and isolation checks](Docs/AgentGuide.md#reusing-bytecode-on-the-world-engine)
+
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor
 ```

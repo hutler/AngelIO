@@ -993,7 +993,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source, UWorl
     S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
     if (S.Module->AddScriptSection(TCHAR_TO_UTF8(*Label), SourceBytes.Get(), SourceBytes.Length()) < 0 ||
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-        FAngelIOStartupProbe::Build(*S.Module) < 0 ||
+        FAngelIOStartupProbe::Build(*S.Module, World, Label, Source, WrapperSource) < 0 ||
 #else
         S.Module->Build() < 0 ||
 #endif

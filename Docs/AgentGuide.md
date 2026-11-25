@@ -203,7 +203,9 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Performance.WaitingMissions` | Startup, process resident-memory growth and baseline/loaded frame time for 1, 100 and 1000 independently ticking mission components |
 | `AngelIO.Performance.MissionStartup` | Paired startup measurements for 1000 instances of the same script, with per-phase timings and a bytecode reuse experiment |
 | `AngelIO.Performance.SharedRegistration` | Paired source builds with one registered engine per mission or per batch of 1000 missions |
+| `AngelIO.Performance.WorldBytecode` | Six alternating pairs of 1000 component starts on fresh world engines, compiling from source or reusing debug bytecode |
 | `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |
+| `AngelIO.Missions.WorldBytecodeIsolation` | Independent globals, signal delivery and source lines across 1000 instances of one cached script |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 To verify a process restart, run the automation command above twice with the filter `AngelIO.Network.ListenServer.CheckpointRestart`. Generate a fresh GUID with `[guid]::NewGuid()`. Add `-AngelIORestartTestWrite=<guid>` to the first editor invocation and `-AngelIORestartTestRead=<guid>` to the second. The first host delivers to floor 4 and exits. The second host restores `Delivered` and accepts confirmation. The test checks floor 4, the physical cab position and zero new trips on both peers, and zero delivery calls in the new host's trace. Successful completion removes the isolated test slot.
@@ -292,6 +294,25 @@ The inspector now records the executing line when a native or signal wait begins
 In `Examples/BlinkPanel.as`, `Notify(RideEnded)` queues the signal that stops the blinking branch. The parent waits for its delivery before switching off the lamp. The listen-server regression holds the panel until the lift arrival and blink timer are both ready, then verifies the client sees the lamp off and the pulse counter stays fixed.
 
 `AngelIO.Network.ListenServer.PartitionLanding` uses the small partitioned map `/Game/Tests/PartitionLift`. The host and client move close enough to load the freight lift, ride to floor 4, leave its cell, and return. The test checks removal from the registry, restored physical height and zero new trips. The read half of `LandedBeforeDeliveredRestart` also connects a late client after the new server is already waiting for confirmation.
+
+#### Reusing bytecode on the world engine
+
+Version 0.7.1 adds an editor benchmark for levels that start many copies of the same script. Run `AngelIO.Performance.WorldBytecode` in isolation with the automation command above. It warms each path with eight actors, then runs six pairs of 1000 `Examples/TimedGate.as` components, alternating which path runs first. Each batch starts with a fresh authority world, an empty cache and one native API registration. The timer starts before the first actor spawn and stops after the last mission reaches its first wait. It excludes world creation, assertions and teardown.
+
+| Mean time per 1000 starts (ms) | v0.7.0 tag, source | Paired source control | Paired bytecode |
+| --- | ---: | ---: | ---: |
+| Build or load modules | 85.3 | 85.2 | 34.6 |
+| Resolve and read script files | 50.8 | 50.9 | 48.0 |
+| Spawn actors | 28.4 | 28.8 | 27.1 |
+| **Total to first wait** | **248.4** | **248.1** | **190.8** |
+
+The measurements used Unreal Engine 5.8.4 Win64 Development Editor with NullRHI on a Ryzen 9 7845HX. For the tag baseline, run `AngelIO.Performance.SharedRegistration` on `v0.7.0` and select `mode=shared_api`. In the paired experiment the source control built 1000 modules. The bytecode path built the first module, saved 471 bytes including debug information and loaded them into 999 separate modules. Both paths still read the file and initialize each component, module and execution context. The mean paired saving was **57.3 ms (23.1%)**, ranging from **52.4 to 69.7 ms** across pairs. Building or loading modules accounted for 50.6 ms of that saving. [Per-run timings and phase breakdown (CSV)](https://github.com/hutler/AngelIO/releases/download/v0.7.1/world-bytecode-startup.csv)
+
+The cache runs only inside editor automation. It retains one entry per probe and matches the world, source label, exact source text and generated wrappers. The measurement supports a world-local memory cache for repeated scripts. Levels with a varied script mix need a representative hit-rate and memory measurement before choosing its capacity.
+
+`AngelIO.Missions.WorldBytecodeIsolation` checks the individual starting floors, trip counters, signals and wait lines (18 or 25) of 1000 `Elevator.as` instances and resumes the last instance after releasing its siblings. `AngelIO.Network.ListenServer.SharedRegistrationInspector` compiles `TypedLift.as` once, releases that module and starts both player panels from its bytecode. The PIE inspector follows the client's ride at line 22 while the host panel waits at line 11. After the host panel stops, the client receives floor 4 and the surviving panel returns to line 11.
+
+#### Packaged landing checks
 
 To reproduce the packaged checks, set `$engine` to the Unreal installation directory and run from the checkout. The staged games use cooked maps and IoStore. `-SkipZenStore` selects local cooked output for this run.
 

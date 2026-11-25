@@ -1,5 +1,6 @@
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 #include "Tests/AngelIOStartupProbe.h"
+#include "Engine/World.h"
 
 THIRD_PARTY_INCLUDES_START
 #include "angelscript.h"
@@ -39,24 +40,41 @@ FAngelIOStartupProbe*& FAngelIOStartupProbe::Current()
     return Active;
 }
 
-int FAngelIOStartupProbe::Build(asIScriptModule& Module)
+int FAngelIOStartupProbe::Build(asIScriptModule& Module, UWorld* World, const FString& Label,
+    const FString& Source, const FString& Wrappers)
 {
     auto* Active = Current();
     if (!Active) return Module.Build();
     auto& Probe = *Active;
     Probe.ModuleBegin = FPlatformTime::Cycles64();
-    FBytecodeStream Stream(Probe.Bytecode);
     int Result;
-    if (Probe.bReuseBytecode && !Probe.Bytecode.IsEmpty())
+    if (Probe.bReuseBytecode && !Probe.Bytecode.IsEmpty() && Probe.CachedWorld == TWeakObjectPtr<UWorld>(World) &&
+        Probe.CachedLabel.Equals(Label, ESearchCase::CaseSensitive) &&
+        Probe.CachedSource.Equals(Source, ESearchCase::CaseSensitive) &&
+        Probe.CachedWrappers.Equals(Wrappers, ESearchCase::CaseSensitive))
     {
         ++Probe.Loads;
+        FBytecodeStream Stream(Probe.Bytecode);
         Result = Module.LoadByteCode(&Stream);
     }
     else
     {
         ++Probe.Builds;
         Result = Module.Build();
-        if (Result >= 0 && Probe.bReuseBytecode) Result = Module.SaveByteCode(&Stream);
+        if (Result >= 0 && Probe.bReuseBytecode)
+        {
+            TArray<uint8> Bytes;
+            FBytecodeStream Stream(Bytes);
+            Result = Module.SaveByteCode(&Stream, /*stripDebugInfo=*/false);
+            if (Result >= 0)
+            {
+                Probe.Bytecode = MoveTemp(Bytes);
+                Probe.CachedWorld = World;
+                Probe.CachedLabel = Label;
+                Probe.CachedSource = Source;
+                Probe.CachedWrappers = Wrappers;
+            }
+        }
     }
     Probe.ModuleEnd = FPlatformTime::Cycles64();
     return Result;

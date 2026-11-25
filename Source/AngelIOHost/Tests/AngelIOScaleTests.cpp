@@ -70,17 +70,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOMissionStartup, "AngelIO.Performance.Mi
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIORegistrationStartup, "AngelIO.Performance.SharedRegistration",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOWorldBytecodeStartup, "AngelIO.Performance.WorldBytecode",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+enum class EStartupMode { PrivateSource, PrivateBytecode, WorldSource, WorldBytecode };
+
+static bool CompareStartup(FAutomationTestBase& Test, EStartupMode Baseline, EStartupMode Candidate)
 {
-    auto RunBatch = [&](int32 Pair, bool bCandidate, int32 Count)
+    auto RunBatch = [&](int32 Pair, EStartupMode Mode, int32 Count)
     {
         FTestWorldWrapper Scene;
         if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
         UWorld* World = Scene.GetTestWorld();
         World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
         FAngelIOStartupProbe Probe;
-        Probe.bReuseBytecode = bCandidate && !bCompareRegistrations;
-        Probe.bForcePrivateEngine = !(bCandidate && bCompareRegistrations);
+        Probe.bReuseBytecode = Mode == EStartupMode::PrivateBytecode || Mode == EStartupMode::WorldBytecode;
+        Probe.bForcePrivateEngine = Mode == EStartupMode::PrivateSource || Mode == EStartupMode::PrivateBytecode;
         TArray<UAngelIOScriptComponent*> Missions;
         Missions.Reserve(Count);
         uint64 Spawn = 0, File = 0, Engine = 0, Core = 0, Providers = 0, Sections = 0;
@@ -144,12 +149,19 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
         if (Pair > 0)
         {
             auto Ms = [](uint64 Cycles) { return FPlatformTime::ToMilliseconds64(Cycles); };
-            const TCHAR* Mode = !Probe.bForcePrivateEngine ? TEXT("shared_api") : Probe.bReuseBytecode ? TEXT("bytecode") : TEXT("source");
+            const TCHAR* Label = TEXT("source");
+            switch (Mode)
+            {
+            case EStartupMode::PrivateSource: break;
+            case EStartupMode::PrivateBytecode: Label = TEXT("bytecode"); break;
+            case EStartupMode::WorldSource: Label = TEXT("shared_api"); break;
+            case EStartupMode::WorldBytecode: Label = TEXT("world_bytecode"); break;
+            }
             Test.AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d registrations=%d builds=%d loads=%d bytes=%d ")
                 TEXT("total_ms=%.3f spawn_ms=%.3f file_ms=%.3f engine_ms=%.3f core_ms=%.3f ")
                 TEXT("providers_ms=%.3f sections_ms=%.3f module_ms=%.3f ")
                 TEXT("inspect_ms=%.3f vm_start_ms=%.3f component_and_loop_ms=%.3f"),
-                Pair, Mode, Count, Probe.Registrations, Probe.Builds, Probe.Loads,
+                Pair, Label, Count, Probe.Registrations, Probe.Builds, Probe.Loads,
                 Probe.Bytecode.Num(), Ms(Total), Ms(Spawn), Ms(File), Ms(Engine), Ms(Core), Ms(Providers),
                 Ms(Sections), Ms(Module), Ms(Inspect), Ms(Start), Ms(Other)));
         }
@@ -157,17 +169,30 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
     };
 
     // Warm both paths. Each measured cohort pays its own first engine registration and source build.
-    if (!RunBatch(0, false, 8) || !RunBatch(0, true, 8)) return false;
+    if (!RunBatch(0, Baseline, 8) || !RunBatch(0, Candidate, 8)) return false;
     for (int32 Pair = 1; Pair <= 6; ++Pair)
     {
         const bool bCandidateFirst = Pair % 2 == 0;
-        if (!RunBatch(Pair, bCandidateFirst, 1000) || !RunBatch(Pair, !bCandidateFirst, 1000)) return false;
+        if (!RunBatch(Pair, bCandidateFirst ? Candidate : Baseline, 1000) ||
+            !RunBatch(Pair, bCandidateFirst ? Baseline : Candidate, 1000)) return false;
     }
     return true;
 }
 
-bool FAngelIOMissionStartup::RunTest(const FString&) { return CompareStartup(*this, false); }
-bool FAngelIORegistrationStartup::RunTest(const FString&) { return CompareStartup(*this, true); }
+bool FAngelIOMissionStartup::RunTest(const FString&)
+{
+    return CompareStartup(*this, EStartupMode::PrivateSource, EStartupMode::PrivateBytecode);
+}
+
+bool FAngelIORegistrationStartup::RunTest(const FString&)
+{
+    return CompareStartup(*this, EStartupMode::PrivateSource, EStartupMode::WorldSource);
+}
+
+bool FAngelIOWorldBytecodeStartup::RunTest(const FString&)
+{
+    return CompareStartup(*this, EStartupMode::WorldSource, EStartupMode::WorldBytecode);
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOWorldOwnership, "AngelIO.Missions.WorldEngineOwnership",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -212,13 +237,17 @@ bool FAngelIOWorldOwnership::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedIsolation, "AngelIO.Missions.SharedRegistrationIsolation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FAngelIOSharedIsolation::RunTest(const FString&)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBytecodeIsolation, "AngelIO.Missions.WorldBytecodeIsolation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+static bool CheckIsolation(FAutomationTestBase& Test, bool bReuseBytecode)
 {
     constexpr int32 Count = 1000;
     FTestWorldWrapper Scene;
     if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
     UWorld* World = Scene.GetTestWorld();
     FAngelIOStartupProbe Probe;
+    Probe.bReuseBytecode = bReuseBytecode;
     TArray<TUniquePtr<FAngelIOProgram>> Missions;
     for (int32 I = 0; I < Count; ++I)
     {
@@ -228,19 +257,21 @@ bool FAngelIOSharedIsolation::RunTest(const FString&)
         TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
         if (!Mission->CompileFile(TEXT("Elevator.as"), World) || !Mission->Start({{TEXT("StartingFloor"), Floor}}))
         {
-            AddError(FString::Printf(TEXT("Could not start shared mission %d"), I));
+            Test.AddError(FString::Printf(TEXT("Could not start shared mission %d"), I));
             return false;
         }
         Missions.Add(MoveTemp(Mission));
     }
-    if (!TestEqual(TEXT("All 1000 modules use one API registration"), Probe.Registrations, 1)) return false;
+    if (!Test.TestEqual(TEXT("All 1000 modules use one API registration"), Probe.Registrations, 1) ||
+        !Test.TestEqual(TEXT("Source builds before invalid edit"), Probe.Builds, bReuseBytecode ? 1 : Count) ||
+        !Test.TestEqual(TEXT("Bytecode loads before invalid edit"), Probe.Loads, bReuseBytecode ? Count - 1 : 0)) return false;
     {
         FAngelIOProgram Invalid;
         TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
-        if (!TestFalse(TEXT("A sibling module can fail to build"), Invalid.Compile(TEXT("Invalid.as"), TEXT("void Run() {\nUnknown();\n}"), World)) ||
-            !TestTrue(TEXT("The failing module owns its diagnostic"), Invalid.Diagnostics().ContainsByPredicate(
+        if (!Test.TestFalse(TEXT("Changed source under the same name fails to build"), Invalid.Compile(TEXT("Elevator.as"), TEXT("void Run() {\nUnknown();\n}"), World)) ||
+            !Test.TestTrue(TEXT("The failing module owns its diagnostic"), Invalid.Diagnostics().ContainsByPredicate(
                 [](const auto& D) { return D.Severity == TEXT("error") && D.Line == 2; })) ||
-            !TestTrue(TEXT("A valid sibling retains clean diagnostics"), Missions.Last()->Diagnostics().IsEmpty())) return false;
+            !Test.TestTrue(TEXT("A valid sibling retains clean diagnostics"), Missions.Last()->Diagnostics().IsEmpty())) return false;
     }
     const auto Lifetime = FAngelIOStartupProbe::WorldEngine(World);
     for (int32 I = 0; I < Count; ++I)
@@ -261,17 +292,23 @@ bool FAngelIOSharedIsolation::RunTest(const FString&)
             Site.State != EAngelIOState::Waiting || Site.Waiting != (bMoving ? TEXT("MotionFinished") : TEXT("RequestFloor")) ||
             Site.Script != TEXT("Elevator.as") || Site.Line != (bMoving ? 25 : 18) || !Site.Instance.IsValid())
         {
-            AddError(FString::Printf(TEXT("Mission %d has incorrect globals, wait or source location"), I));
+            Test.AddError(FString::Printf(TEXT("Mission %d has incorrect globals, wait or source location"), I));
             return false;
         }
         Instances.Add(Site.Instance);
     }
-    if (!TestEqual(TEXT("Distinct mission IDs"), Instances.Num(), Count)) return false;
-    Missions.SetNum(1);
-    if (!TestEqual(TEXT("Only the retained native mission module remains"), FAngelIOStartupProbe::WorldModuleCount(World), 1)) return false;
+    if (!Test.TestEqual(TEXT("Distinct mission IDs"), Instances.Num(), Count)) return false;
+    auto Survivor = MoveTemp(Missions.Last());
+    Missions.Reset();
+    if (!Test.TestEqual(TEXT("Only the last module remains"), FAngelIOStartupProbe::WorldModuleCount(World), 1) ||
+        !Test.TestTrue(TEXT("The survivor can resume after the first module was discarded"), Survivor->Signal(TEXT("RequestFloor"), 4)) ||
+        !Test.TestEqual(TEXT("The survivor advances to its own motion wait"), Survivor->InspectMission().Line, 25)) return false;
     if (!Scene.DestroyTestWorld(true)) return false;
-    return TestFalse(TEXT("World teardown releases the registered engine"), Lifetime.IsValid()) &&
-        TestTrue(TEXT("Retained native program stops at world teardown"), Missions[0]->State() == EAngelIOState::Failed &&
-            !Missions[0]->Signal(TEXT("RequestFloor"), 4));
+    return Test.TestFalse(TEXT("World teardown releases the registered engine"), Lifetime.IsValid()) &&
+        Test.TestTrue(TEXT("Retained native program stops at world teardown"), Survivor->State() == EAngelIOState::Failed &&
+            !Survivor->Signal(TEXT("MotionFinished"), 4));
 }
+
+bool FAngelIOSharedIsolation::RunTest(const FString&) { return CheckIsolation(*this, false); }
+bool FAngelIOBytecodeIsolation::RunTest(const FString&) { return CheckIsolation(*this, true); }
 #endif

@@ -7,7 +7,7 @@ class asIScriptModule;
 struct FAngelIORegisteredEngine;
 class UWorld;
 
-// Active only during synchronous registration of a benchmark component on this thread.
+// Each automation cohort owns its probe and runs synchronously against a fixed native API.
 struct ANGELIO_API FAngelIOStartupProbe
 {
     static FAngelIOStartupProbe*& Current();
@@ -25,6 +25,11 @@ struct ANGELIO_API FAngelIOStartupProbe
     {
         if (auto* Probe = Current()) Probe->*Field = FPlatformTime::Cycles64();
     }
-    static int Build(asIScriptModule& Module);
+    static int Build(asIScriptModule& Module, UWorld* World, const FString& Label, const FString& Source,
+        const FString& Wrappers);
+
+private:
+    TWeakObjectPtr<UWorld> CachedWorld;
+    FString CachedLabel, CachedSource, CachedWrappers;
 };
 #endif
