@@ -19,6 +19,8 @@ struct ANGELIOEDITOR_API FAngelIOMapReport
     FString Map;
     int32 MissionsChecked = 0;
     TArray<FAngelIOMapDiagnostic> Diagnostics;
+    TArray<const AActor*> Actors;
+    TArray<const UAngelIOScriptComponent*> Components;
     bool IsValid() const;
 };
 

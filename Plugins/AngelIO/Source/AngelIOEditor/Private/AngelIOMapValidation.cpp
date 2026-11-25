@@ -51,6 +51,7 @@ FAngelIOMapReport AngelIO::ValidateMap(UWorld& World)
         for (const AActor* Actor : Level->Actors)
         {
             if (!IsValid(Actor) || Actor->IsEditorOnly()) continue;
+            Report.Actors.Add(Actor);
             for (const auto* Component : TInlineComponentArray<UAngelIOScriptComponent*>(Actor))
             {
                 if (Component->IsEditorOnly()) continue;
@@ -68,6 +69,7 @@ FAngelIOMapReport AngelIO::ValidateMap(UWorld& World)
     }
 
     TMap<FString, TSharedPtr<FAngelIOProgram>> Programs;
+    Report.Components = Missions;
     for (const auto* Mission : Missions)
     {
         if (Mission->Script.IsEmpty() && !Mission->bStartOnBeginPlay && Mission->InitialInputs.IsEmpty()) continue;

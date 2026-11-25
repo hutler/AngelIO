@@ -3,6 +3,7 @@
 #include "AngelIOMapValidation.h"
 #include "AngelIOScriptComponent.h"
 #include "Engine/World.h"
+#include "Engine/Level.h"
 #include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
@@ -32,7 +33,7 @@ int32 WriteReport(TSharedRef<FJsonObject> Root, const FString& Report, bool bVal
     return bValid ? 0 : 1;
 }
 
-int32 CheckMap(const FString& Map, const FString& Output)
+int32 CheckMap(const FString& Map, const FString& Output, bool bDescribe)
 {
     FAngelIOMapReport Report;
     Report.Map = Map;
@@ -46,6 +47,41 @@ int32 CheckMap(const FString& Map, const FString& Output)
     auto Root = MakeShared<FJsonObject>();
     Root->SetStringField(TEXT("map"), Report.Map);
     Root->SetNumberField(TEXT("missionsChecked"), Report.MissionsChecked);
+    if (bDescribe)
+    {
+        TArray<TSharedPtr<FJsonValue>> Actors, Components;
+        for (const AActor* Actor : Report.Actors)
+        {
+            auto Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("id"), Actor->GetPathName());
+            Json->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetPathName());
+            Json->SetStringField(TEXT("room"), Actor->GetLevel()->GetPathName());
+            Actors.Add(MakeShared<FJsonValueObject>(Json));
+        }
+        for (const auto* Component : Report.Components)
+        {
+            auto Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("id"), Component->GetPathName());
+            Json->SetStringField(TEXT("actor"), Component->GetOwner() ? Component->GetOwner()->GetPathName() : FString());
+            Json->SetStringField(TEXT("script"), Component->Script);
+            Json->SetStringField(TEXT("targetName"), Component->GetTargetName().ToString());
+            Json->SetBoolField(TEXT("autoStart"), Component->bStartOnBeginPlay);
+            auto Bindings = MakeShared<FJsonObject>();
+            for (const auto& Pair : Component->RoomTargets) Bindings->SetStringField(Pair.Key.ToString(), Pair.Value.ToString());
+            Json->SetObjectField(TEXT("roomTargets"), Bindings);
+            auto Inputs = MakeShared<FJsonObject>();
+            for (const auto& Pair : Component->InitialInputs)
+            {
+                const auto& V = Pair.Value;
+                if (V.Type == EAngelIOType::Boolean) Inputs->SetBoolField(Pair.Key,V.Boolean);
+                else Inputs->SetNumberField(Pair.Key, V.Type == EAngelIOType::Integer ? double(V.Integer) : double(V.Float));
+            }
+            Json->SetObjectField(TEXT("initialInputs"), Inputs);
+            Components.Add(MakeShared<FJsonValueObject>(Json));
+        }
+        Root->SetArrayField(TEXT("actors"), Actors);
+        Root->SetArrayField(TEXT("components"), Components);
+    }
     TArray<TSharedPtr<FJsonValue>> Diagnostics;
     for (const auto& D : Report.Diagnostics)
     {
@@ -71,14 +107,18 @@ int32 UAngelIOCheckCommandlet::Main(const FString& Params)
     FString Script, Report, Map;
     const bool bApiOnly = FParse::Param(*Params, TEXT("ApiOnly"));
     if (!FParse::Value(*Params, TEXT("Report="), Report)) return 2;
-    if (FParse::Value(*Params, TEXT("Map="), Map)) return CheckMap(Map, Report);
+    if (FParse::Value(*Params, TEXT("Map="), Map)) return CheckMap(Map, Report, FParse::Param(*Params, TEXT("DescribeScene")));
     if (!bApiOnly && !FParse::Value(*Params, TEXT("Script="), Script))
     {
         UE_LOG(LogTemp, Error, TEXT("Expected -Script=<relative .as> -Report=<output.json>"));
         return 2;
     }
     FAngelIOProgram Program;
-    const bool bValid = bApiOnly ? Program.Compile(TEXT("API"), TEXT("void Run() {}")) : Program.CompileFile(Script);
+    FString Candidate, Source;
+    const bool bCandidate = FParse::Value(*Params, TEXT("Candidate="), Candidate);
+    if (bCandidate && !FFileHelper::LoadFileToString(Source, *Candidate)) return 2;
+    const bool bValid = bApiOnly ? Program.Compile(TEXT("API"), TEXT("void Run() {}")) :
+        bCandidate ? Program.Compile(Script, Source) : Program.CompileFile(Script);
     auto Root = MakeShared<FJsonObject>();
     Root->SetStringField(TEXT("script"), Script);
     TArray<TSharedPtr<FJsonValue>> Declarations;

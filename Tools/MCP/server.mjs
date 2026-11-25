@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { link, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs, promisify } from "node:util";
@@ -26,13 +28,17 @@ function result(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], structuredContent: data };
 }
 
-async function scriptPath(script) {
+async function scriptPath(script, allowNew = false) {
   if (path.isAbsolute(script) || /[:"\x00-\x1f]/.test(script) ||
       script.split(/[\\/]/).includes("..") || path.extname(script).toLowerCase() !== ".as")
     throw new Error("Expected a relative .as file under Content/AngelIO");
-  const target = await realpath(path.resolve(root, script));
+  const parent = await realpath(path.resolve(root, path.dirname(script)));
+  const entry = path.join(parent, path.basename(script));
+  let target;
+  try { target = await realpath(entry); }
+  catch (error) { if (!allowNew || error.code !== "ENOENT") throw error; target = entry; }
   const relative = path.relative(root, target);
-  if (relative.startsWith(".." + path.sep) || path.isAbsolute(relative) || !(await stat(target)).isFile())
+  if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative) || (!allowNew && !(await stat(target)).isFile()))
     throw new Error("Script resolves outside Content/AngelIO or is not a file");
   return { target, relative: relative.split(path.sep).join("/") };
 }
@@ -57,7 +63,55 @@ server.registerTool("read_script", {
   description: "Read the source of a project mission.", inputSchema, annotations
 }, async ({ script }) => {
   const { target, relative } = await scriptPath(script);
-  return result({ script: relative, source: await readFile(target, "utf8") });
+  const bytes = await readFile(target);
+  return result({ script: relative, source: bytes.toString("utf8"), revision: digest(bytes) });
+});
+
+const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+async function revision(file) {
+  try { return digest(await readFile(file)); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
+server.registerTool("write_script", {
+  description: "Compile a proposed mission using the game bindings. Dry runs leave the file untouched. Commit only if its SHA-256 still matches read_script. Supply null to create a new mission.",
+  inputSchema: { ...inputSchema, source: z.string().min(1), expectedRevision: z.string().regex(/^[0-9a-f]{64}$/).nullable(), dryRun: z.boolean().default(true) },
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true }
+}, async ({ script, source, expectedRevision, dryRun }) => {
+  const { target, relative } = await scriptPath(script, true);
+  const conflict = current => result({ valid: false, written: false, code: "revision_conflict", script: relative, currentRevision: current });
+  let current = await revision(target);
+  if (current !== expectedRevision) return conflict(current);
+  const report = await validate("-Script=" + relative, [], source);
+  const nextRevision = digest(source);
+  if (!report.valid) return result({ ...report, written: false, code: "compile_failed" });
+  // Serialize the final compare-and-publish across local MCP processes. The OS
+  // releases the listening socket when its process exits, including on a crash.
+  const lock = createServer();
+  const key = digest(process.platform === "win32" ? target.toLowerCase() : target);
+  const socket = process.platform === "win32" ? "//./pipe/angelio-" + key : path.join(tmpdir(), "aio-" + key.slice(0, 32));
+  try {
+    await new Promise((resolve, reject) => { lock.once("error", reject); lock.listen(socket, resolve); });
+  } catch (error) {
+    if (error.code === "EADDRINUSE") return result({ valid: false, written: false, code: "write_busy", script: relative });
+    throw error;
+  }
+  const temporary = path.join(path.dirname(target), ".angelio-" + randomUUID() + ".tmp");
+  try {
+    if (!dryRun) await writeFile(temporary, source, { flag: "wx" });
+    current = await revision(target);
+    if (current !== expectedRevision) return conflict(current);
+    if (!dryRun) {
+      if (expectedRevision === null) {
+        try { await link(temporary, target); }
+        catch (error) { if (error.code === "EEXIST") return conflict(await revision(target)); throw error; }
+      } else await rename(temporary, target);
+    }
+    return result({ ...report, written: !dryRun, revision: dryRun ? current : nextRevision, proposedRevision: nextRevision });
+  } finally {
+    lock.close();
+    if (!dryRun) await rm(temporary, { force: true });
+  }
 });
 
 const traceFilename = /^\d{8}-\d{6}-\d{3}-[a-f0-9]{32}\.json$/i;
@@ -142,12 +196,17 @@ server.registerTool("describe_api", {
   });
 });
 
-async function validate(selector = "-ApiOnly") {
+async function validate(selector = "-ApiOnly", args = [], candidate) {
   const dir = await mkdtemp(path.join(tmpdir(), "angelio-check-"));
   try {
     const report = path.join(dir, "report.json");
+    if (candidate !== undefined) {
+      const file = path.join(dir, "candidate.as");
+      await writeFile(file, candidate);
+      args = [...args, "-Candidate=" + file];
+    }
     try {
-      await exec(editor, [project, "-run=AngelIOCheck", selector, "-Report=" + report,
+      await exec(editor, [project, "-run=AngelIOCheck", selector, ...args, "-Report=" + report,
         "-unattended", "-nullrhi", "-nosound", "-nop4", "-nosplash", "-ddc=InstalledNoZenLocalFallback",
         "-abslog=" + path.join(dir, "check.log")],
         { timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
@@ -170,10 +229,16 @@ server.registerTool("validate_script", {
   return result(await validate("-Script=" + relative));
 });
 
+const mapSchema = { map: z.string().regex(/^\/Game\/(?:[\p{L}\p{N}_-]+\/)*[\p{L}\p{N}_-]+$/u)
+  .describe("Saved map package, e.g. /Game/Demo/TwoLifts") };
 server.registerTool("validate_map", {
   description: "Check missions on loaded actors and default player-controller components in a saved map. Reports script, initial input and literal named-target diagnostics without starting PIE.",
-  inputSchema: { map: z.string().regex(/^\/Game\/(?:[\p{L}\p{N}_-]+\/)*[\p{L}\p{N}_-]+$/u)
-    .describe("Saved map package, e.g. /Game/Demo/TwoLifts") }, annotations
+  inputSchema: mapSchema, annotations
 }, async ({ map }) => result(await validate("-Map=" + map)));
+
+server.registerTool("describe_scene", {
+  description: "Describe saved map actors, placed mission components, controller templates, inputs and room target bindings by Unreal object path, with validation diagnostics.",
+  inputSchema: mapSchema, annotations
+}, async ({ map }) => result(await validate("-Map=" + map, ["-DescribeScene"])));
 
 await server.connect(new StdioServerTransport());

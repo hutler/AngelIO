@@ -24,7 +24,7 @@ let fixture;
 try {
   await client.connect(transport);
   const tools = (await client.listTools()).tools.map(tool => tool.name);
-  assert.deepEqual(tools.sort(), ["describe_api", "list_scripts", "read_script", "read_trace", "validate_map", "validate_script"]);
+  assert.deepEqual(tools.sort(), ["describe_api", "describe_scene", "list_scripts", "read_script", "read_trace", "validate_map", "validate_script", "write_script"]);
   assert((await call("read_trace", { trace: "../DefaultEngine.ini" })).isError);
   const newest = await call("read_trace", { limit: 1 });
   if (newest.isError) assert.match(newest.content[0].text, /No AngelIO trace found/);
@@ -185,6 +185,10 @@ try {
   assert(delivery.valid && delivery.inputSignals.includes("Confirm") && delivery.ports.some(p => p.name === "Stage" && p.direction === "out"));
   const mapReport = (await call("validate_map", { map: "/Game/Demo/TwoLifts" })).structuredContent;
   assert(mapReport.valid && mapReport.missionsChecked === 4, JSON.stringify(mapReport));
+  const scene = (await call("describe_scene", { map: "/Game/Demo/TwoLifts" })).structuredContent;
+  assert(scene.actors.some(a => a.id && a.room && a.actorClass));
+  assert(scene.components.some(c => c.targetName === "FreightLift" && scene.actors.some(a => a.id === c.actor)));
+  assert(scene.components.some(c => c.script === "TypedLift.as" && c.roomTargets && c.initialInputs));
   const missing = (await call("validate_map", { map: "/Game/Demo/NoSuchAngelIOMap" })).structuredContent;
   assert(!missing.valid && missing.diagnostics.some(d => d.code === "map_load"));
   assert((await call("validate_map", { map: "/Game/../Engine" })).isError);
@@ -207,6 +211,20 @@ try {
   const bad = response.structuredContent;
   assert.equal(bad.valid, false);
   assert(bad.diagnostics.some(d => d.line === 2 && d.column > 0 && d.severity === "error"));
+  const script = path.relative(root, invalid);
+  const original = (await call("read_script", { script })).structuredContent;
+  const edit = { script, source: "void Run() {}\n", expectedRevision: original.revision };
+  const dry = (await call("write_script", edit)).structuredContent;
+  assert(dry.valid && !dry.written && dry.revision === original.revision);
+  const broken = (await call("write_script", { ...edit, source: original.source, dryRun: false })).structuredContent;
+  assert.equal(broken.code, "compile_failed");
+  assert.equal((await call("read_script", { script })).structuredContent.source, original.source);
+  const saved = (await call("write_script", { ...edit, dryRun: false })).structuredContent;
+  assert(saved.written && saved.revision === dry.proposedRevision);
+  const stale = (await call("write_script", { ...edit, dryRun: false })).structuredContent;
+  assert.equal(stale.code, "revision_conflict");
+  assert.equal(stale.currentRevision, saved.revision);
+  assert.equal((await call("read_script", { script })).structuredContent.source, edit.source);
   assert((await call("read_script", { script: "../Outside.as" })).isError);
   console.log("MCP stdio OK: discovery, source, API, mission and map validation, error locations, path scope.");
 } finally {

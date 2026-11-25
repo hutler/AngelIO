@@ -232,6 +232,8 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
 | `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
 | `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
+| `describe_scene` | Saved map actors and mission components by object path, including room-local name bindings and initial inputs |
+| `write_script` | Compiles a proposed source, checks its SHA-256 revision and optionally commits the file. Defaults to a dry run |
 | `read_trace` | Exported mission events, optionally filtered by operation, checkpoint or persisted state ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
