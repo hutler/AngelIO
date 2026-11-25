@@ -589,6 +589,104 @@ bool FAngelIOWaitActorListen::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointListen, "AngelIO.Network.ListenServer.MissionCheckpoints",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBranchListen, "AngelIO.Network.ListenServer.BlinkBranches",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOBranchListen::RunTest(const FString&)
+{
+    StartListenSession(TEXT("/Engine/Maps/Entry"));
+    const auto Steps = ListenSteps(this);
+    struct FRoom
+    {
+        TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
+        FGuid FirstRun;
+        int32 FinalPulses = 0;
+        double CheckAfter = 0;
+    };
+    const auto Room = MakeShared<FRoom>();
+    Steps(TEXT("load branch panel for both peers"), [Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client || !Client->GetFirstPlayerController()) return false;
+        Room->Host = LoadLiftRoom(Host, false);
+        Room->Client = LoadLiftRoom(Client, false);
+        return true;
+    });
+    auto StartRoom = [&]
+    {
+        Steps(TEXT("show panel mission"), [Room]
+        {
+            auto* Panel = DeliveryPanel(Room->Host.Get());
+            if (!Panel || !Room->Client->GetLoadedLevel()) return false;
+            Panel->Script = TEXT("Examples/BlinkPanel.as");
+            Panel->bStartOnBeginPlay = true;
+            Room->Host->SetShouldBeVisible(true);
+            Room->Client->SetShouldBeVisible(true);
+            return true;
+        });
+        Steps(TEXT("dispatch the panel"), [this, Room]
+        {
+            auto* Panel = DeliveryPanel(Room->Client.Get());
+            if (!Panel || Panel->GetWaitingSignal() != TEXT("Dispatch")) return false;
+            TestTrue(TEXT("New panel starts with zero pulses"), TripOutput(Panel, TEXT("Pulses"), 0));
+            return DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 4);
+        });
+        Steps(TEXT("inspect a live blinking branch during the ride"), [this, Room]
+        {
+            auto* Panel = DeliveryPanel(Room->Host.Get());
+            FAngelIOValue Pulses;
+            if (!DeliveryPanel(Room->Client.Get())->GetOutput(TEXT("Pulses"), Pulses) || Pulses.Integer < 2) return false;
+            auto Info = Panel->InspectMission();
+            TestEqual(TEXT("Parent awaits the specific ride"), Info.Waiting, FString(TEXT("LiftTrip.Wait")));
+            TestTrue(TEXT("Inspector identifies child, source and timer"), Info.BranchWaits.Num() == 1 &&
+                Info.BranchWaits[0].Contains(TEXT("Blink · Examples/BlinkPanel.as:")) && Info.BranchWaits[0].EndsWith(TEXT("WaitSeconds")));
+            if (!Room->FirstRun.IsValid()) Room->FirstRun = Info.Instance;
+            else TestNotEqual(TEXT("Reloaded room has a fresh branch owner"), Info.Instance, Room->FirstRun);
+            return true;
+        });
+    };
+    StartRoom();
+    Steps(TEXT("unload before the first blinking ride finishes"), [Room]
+    {
+        for (auto* Stream : {Room->Host.Get(), Room->Client.Get()})
+        {
+            Stream->SetShouldBeVisible(false);
+            Stream->SetShouldBeLoaded(false);
+        }
+        return true;
+    });
+    Steps(TEXT("wait for full unload and recreate the room"), [Room]
+    {
+        if (Room->Host->GetLoadedLevel() || Room->Client->GetLoadedLevel()) return false;
+        Room->Host->SetShouldBeLoaded(true);
+        Room->Client->SetShouldBeLoaded(true);
+        return true;
+    });
+    StartRoom();
+    Steps(TEXT("arrival ends blinking"), [this, Room]
+    {
+        auto* Panel = DeliveryPanel(Room->Client.Get());
+        if (!Panel || Panel->GetWaitingSignal() != TEXT("Confirm")) return false;
+        FAngelIOValue Count, Lamp;
+        if (!Panel->GetOutput(TEXT("Pulses"), Count) || !Panel->GetOutput(TEXT("Lamp"), Lamp)) return false;
+        TestFalse(TEXT("Client sees extinguished lamp"), Lamp.Boolean);
+        TestTrue(TEXT("EndOn removed the child"), DeliveryPanel(Room->Host.Get())->InspectMission().BranchWaits.IsEmpty());
+        Room->FinalPulses = Count.Integer;
+        Room->CheckAfter = Panel->GetWorld()->GetTimeSeconds() + 0.35;
+        return true;
+    });
+    Steps(TEXT("cancelled timer stays silent"), [this, Room]
+    {
+        auto* Panel = DeliveryPanel(Room->Client.Get());
+        if (Panel->GetWorld()->GetTimeSeconds() < Room->CheckAfter) return false;
+        TestTrue(TEXT("No pulses after cancellation"), TripOutput(Panel, TEXT("Pulses"), Room->FinalPulses));
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
 bool FAngelIOCheckpointListen::RunTest(const FString&)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;

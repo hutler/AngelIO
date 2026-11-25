@@ -249,6 +249,11 @@ void UAngelIOScriptComponent::DispatchPendingEvents()
         }
         const FAngelIOEvent Event = MoveTemp(Pending[0]);
         Pending.RemoveAt(0, EAllowShrinking::No);
+        if (Event.bNotifySelf)
+        {
+            SendSignal(Event.Name, Event.Value);
+            continue;
+        }
         if (!Event.Target.IsNone())
         {
             if (auto* Registry = GetWorld()->GetSubsystem<UAngelIOTargetRegistry>())

@@ -51,6 +51,7 @@ struct FAngelIOEvent
     FString Name;
     int32 Value;
     FName Target = NAME_None;
+    bool bNotifySelf = false;
 };
 
 enum class EAngelIOState { Empty, Compiled, Running, Waiting, Finished, Failed };
@@ -84,6 +85,7 @@ struct FAngelIOMissionInspection
     FString SavedStage, RestoredStage;
     int32 SavedVersion = 0, RestoredVersion = 0;
     TMap<FGuid, FAngelIOInspectedInteger> PersistedIntegers;
+    TArray<FString> BranchWaits;
 };
 #endif
 

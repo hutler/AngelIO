@@ -369,6 +369,7 @@ void SAngelIOMissionInspector::Refresh()
         default: Wait = TEXT("Stopped"); break;
     }
     if (Inspection.Operation.IsValid()) Wait += TEXT("  ·  ") + Inspection.Operation.ToString(EGuidFormats::DigitsWithHyphensLower);
+    for (const auto& Branch : Inspection.BranchWaits) Wait += TEXT("\n") + Branch;
     const auto* Trace = Authority->GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>();
     const int64 Revision = Trace ? Trace->GetInspectionRevision() : 0;
     if (HistoryRevision != Revision || Previous.Instance != Inspection.Instance || Previous.Operation != Inspection.Operation)

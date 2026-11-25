@@ -184,6 +184,7 @@ server.registerTool("describe_api", {
     signals: "Declare InputSignal and OutputSignal enums at global scope. Use 32-bit enums with unique values.",
     calls: [
       "WaitFor(InputSignal value) suspends until this component receives that signal.",
+      "WaitSeconds(float seconds) waits in game time. Fork(MissionBranch@ entry) runs a child until its first wait. EndOn(InputSignal s) cancels that child when its component receives s. Notify(InputSignal s, int value = 0) queues a signal on the same component.",
       "SendTo(const string &in target, const string &in input, int value) delivers to live components with this TargetName in the authoritative world.",
       "int SignalValue() reads the last delivered integer payload.",
       "string LoadCheckpoint(int version = 1) reads this room component's saved stage. An absent record or a version mismatch returns an empty string.",

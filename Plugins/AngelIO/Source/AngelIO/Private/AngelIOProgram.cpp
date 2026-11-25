@@ -38,6 +38,7 @@ namespace
         TWeakObjectPtr<UActorComponent> Component;
         FGuid InstanceId;
         FGuid CheckpointStepId;
+        FGuid BranchId;
         TSharedPtr<FAngelIOOperation> Pending;
         TSharedPtr<FConditionWait> Condition;
         TSharedPtr<EAngelIOWaitOutcome> WaitOutcome;
@@ -73,6 +74,7 @@ namespace
         Site->SetStringField(TEXT("kind"), Scope ? TEXT("script") : TEXT("native"));
         if (!Scope) return Site;
         Site->SetStringField(TEXT("instanceId"), Scope->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
+        if (Scope->BranchId.IsValid()) Site->SetStringField(TEXT("branchId"), Scope->BranchId.ToString(EGuidFormats::DigitsWithHyphensLower));
         const char* Section = nullptr;
         asUINT Frame = 0;
         int Line = Context->GetLineNumber(Frame, nullptr, &Section);
@@ -348,16 +350,31 @@ struct FAngelIOProgram::FImpl
     int32 Steps = 0;
     int32 BudgetLine = 0;
     bool bInRun = false;
+    FImpl* Root = nullptr;
+    int32 ChildCount = 0;
+    TArray<TSharedPtr<FImpl>> Children;
+    TSet<FString> EndSignals;
+    FString BranchName;
+
+    TArray<FAngelIOEvent>& EventQueue() { return Root ? Root->Events : Events; }
+
+    void DetachOwner()
+    {
+        Scope.Component.Reset();
+        for (const auto& Child : Children) Child->DetachOwner();
+    }
 
     ~FImpl()
     {
+        Children.Reset();
         if (Scope.WaitOutcome) *Scope.WaitOutcome = EAngelIOWaitOutcome::Detached;
         if (Scope.Pending && Scope.WaitSite)
             if (auto Event = Scope.Pending->AddEvent(TEXT("detach")))
                 Event->SetObjectField(TEXT("waiter"), Scope.WaitSite);
         if (Scope.Condition) Scope.Condition->Detach();
         if (Context) Context->Release();
-        if (Engine) Engine->ShutDownAndRelease();
+        if (Root) --Root->ChildCount;
+        else if (Engine) Engine->ShutDownAndRelease();
     }
 
     bool Fail(FString Message, int32 Line = 0, int32 Column = 0)
@@ -366,6 +383,7 @@ struct FAngelIOProgram::FImpl
         Status = EAngelIOState::Failed;
         Waiting.Reset();
         Events.Reset();
+        Children.Reset();
         return false;
     }
 
@@ -418,7 +436,7 @@ struct FAngelIOProgram::FImpl
         }
         else
         {
-            Self.Events.Add({*Name, static_cast<int32>(Call->GetArgDWord(1))});
+            Self.EventQueue().Add({*Name, static_cast<int32>(Call->GetArgDWord(1))});
         }
     }
 
@@ -440,9 +458,70 @@ struct FAngelIOProgram::FImpl
             Context->SetException("None is not an addressable target");
             return;
         }
-        Self->Events.Add({UTF8_TO_TCHAR(Input.c_str()), static_cast<int32>(Call->GetArgDWord(2)), TargetName});
+        Self->EventQueue().Add({UTF8_TO_TCHAR(Input.c_str()), static_cast<int32>(Call->GetArgDWord(2)), TargetName});
     }
     static void Emit(asIScriptGeneric* Call) { SignalCall(Call, false); }
+    static void BranchSignal(asIScriptGeneric* Call)
+    {
+        auto* Ctx = asGetActiveContext();
+        auto* Self = static_cast<FImpl*>(Ctx->GetUserData());
+        const bool bEnd = Call->GetArgCount() == 1;
+        if (!Self || !Self->bInRun || (bEnd && !Self->Root) ||
+            Call->GetArgTypeId(0) != Self->Module->GetTypeIdByDecl("InputSignal"))
+        {
+            Ctx->SetException("Notify requires a mission input; EndOn requires a child branch and a mission input");
+            return;
+        }
+        const auto* Name = Self->Inputs.Find(*static_cast<const int32*>(Call->GetArgAddress(0)));
+        if (!Name) { Ctx->SetException("Unknown input signal"); return; }
+        if (bEnd) Self->EndSignals.Add(*Name);
+        else Self->EventQueue().Add({*Name, static_cast<int32>(Call->GetArgDWord(1)), NAME_None, true});
+    }
+
+    static void WaitSeconds(asIScriptGeneric* Call)
+    {
+        const float Seconds = Call->GetArgFloat(0);
+        auto* Scope = GetWaitScope(Seconds);
+        if (!Scope || Seconds == 0) return;
+        TWeakObjectPtr<UWorld> World = Scope->World;
+        const double End = World->GetTimeSeconds() + Seconds;
+        AngelIO::AwaitCondition(TEXT("WaitSeconds"), {}, {}, [World, End]{ return World.IsValid() && World->GetTimeSeconds() >= End; });
+    }
+
+    static void Fork(asIScriptGeneric* Call)
+    {
+        auto* Ctx = asGetActiveContext();
+        auto* Self = static_cast<FImpl*>(Ctx->GetUserData());
+        auto* Fn = static_cast<asIScriptFunction*>(Call->GetArgObject(0));
+        if (!Self || !Self->bInRun || !Fn || Fn->GetModule() != Self->Module || Fn->GetObjectType())
+        {
+            Ctx->SetException("Fork requires a mission function with signature void f()");
+            return;
+        }
+        auto* Root = Self->Root ? Self->Root : Self;
+        if (Root->ChildCount >= 64) { Ctx->SetException("Mission branch limit reached"); return; }
+        TSharedPtr<FImpl> Child = MakeShared<FImpl>();
+        Child->Root = Root;
+        ++Root->ChildCount;
+        Child->Engine = Self->Engine;
+        Child->Module = Self->Module;
+        Child->Inputs = Self->Inputs;
+        Child->Outputs = Self->Outputs;
+        Child->ScriptSection = Self->ScriptSection;
+        Child->Scope.Component = Self->Scope.Component;
+        Child->Scope.World = Self->Scope.World;
+        Child->Scope.InstanceId = Self->Scope.InstanceId;
+        Child->Scope.BranchId = FGuid::NewGuid();
+        Child->Scope.CheckpointStepId = Self->Scope.CheckpointStepId;
+        Child->BranchName = UTF8_TO_TCHAR(Fn->GetName());
+        Child->Context = Self->Engine->CreateContext();
+        if (!Child->Context || Child->Context->Prepare(Fn) < 0) { Ctx->SetException("Cannot prepare child branch"); return; }
+        Child->Context->SetUserData(Child.Get());
+        Child->Context->SetLineCallback(asFUNCTION(Line), Child.Get(), asCALL_CDECL);
+        Self->Children.Add(Child);
+        if (!Child->Execute()) Ctx->SetException(TCHAR_TO_UTF8(*Child->Messages.Last().Message));
+        if (Child->Status != EAngelIOState::Waiting) Self->Children.RemoveSingle(Child);
+    }
     static void SignalValue(asIScriptGeneric* Call)
     {
         const auto* Self = static_cast<FImpl*>(asGetActiveContext()->GetUserData());
@@ -544,7 +623,9 @@ struct FAngelIOProgram::FImpl
             Source.remove_prefix(Length);
             if (Kind == asTC_COMMENT || Kind == asTC_WHITESPACE) continue;
             if (bAfterEnum && Token == "InputSignal")
-                Module->AddScriptSection("AngelIO API", "void WaitFor(InputSignal s) { AngelIOInternal::WaitFor(s); }");
+                Module->AddScriptSection("AngelIO API", "void WaitFor(InputSignal s) { AngelIOInternal::WaitFor(s); }\n"
+                    "void EndOn(InputSignal s) { AngelIOInternal::EndOn(s); }\n"
+                    "void Notify(InputSignal s, int value = 0) { AngelIOInternal::Notify(s, value); }");
             if (bAfterEnum && Token == "OutputSignal")
                 Module->AddScriptSection("AngelIO API", "void Emit(OutputSignal s, int v) { AngelIOInternal::Emit(s, v); }");
             if (Token == "{") ++Depth;
@@ -614,7 +695,10 @@ struct FAngelIOProgram::FImpl
         bInRun = false;
         if (Scope.Pending) Waiting = Scope.Label;
         if (Code == asEXECUTION_FINISHED)
+        {
             Status = EAngelIOState::Finished;
+            Children.Reset();
+        }
         else if (Code == asEXECUTION_SUSPENDED && !Waiting.IsEmpty())
             Status = EAngelIOState::Waiting;
         else
@@ -636,6 +720,14 @@ struct FAngelIOProgram::FImpl
             return P.bInput == bInput && P.Name.Equals(Name, ESearchCase::CaseSensitive);
         });
     }
+
+    bool NeedsTick() const
+    {
+        return Status == EAngelIOState::Waiting && (Scope.Pending.IsValid() ||
+            Children.ContainsByPredicate([](const auto& Child){ return Child->NeedsTick(); }));
+    }
+    bool ResumeOperation();
+    bool Advance(const FString* Signal, int32 Value);
 };
 
 FAngelIOProgram::FAngelIOProgram() : Impl(MakeUnique<FImpl>()) {}
@@ -643,7 +735,7 @@ FAngelIOProgram::~FAngelIOProgram() = default;
 
 void FAngelIOProgram::DetachComponent()
 {
-    Impl->Scope.Component.Reset();
+    Impl->DetachOwner();
 }
 
 bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
@@ -677,7 +769,12 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
         S.Engine->SetDefaultNamespace("AngelIOInternal") < 0 ||
         S.Engine->RegisterGlobalFunction("void WaitFor(const ?&in)", asFUNCTION(FImpl::Wait), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("void Emit(const ?&in, int)", asFUNCTION(FImpl::Emit), asCALL_GENERIC) < 0 ||
+        S.Engine->RegisterGlobalFunction("void EndOn(const ?&in)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
+        S.Engine->RegisterGlobalFunction("void Notify(const ?&in, int)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
         S.Engine->SetDefaultNamespace("") < 0 ||
+        S.Engine->RegisterFuncdef("void MissionBranch()") < 0 ||
+        S.Engine->RegisterGlobalFunction("void Fork(MissionBranch@+ entry)", asFUNCTION(FImpl::Fork), asCALL_GENERIC) < 0 ||
+        S.Engine->RegisterGlobalFunction("void WaitSeconds(float seconds)", asFUNCTION(FImpl::WaitSeconds), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("string LoadCheckpoint(int version = 1)", asFUNCTION(FImpl::LoadCheckpoint), asCALL_GENERIC) < 0 ||
         S.Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
@@ -810,22 +907,53 @@ bool FAngelIOProgram::GetOutput(const FString& Name, FAngelIOValue& Value) const
 
 bool FAngelIOProgram::Signal(const FString& Name, int32 Value)
 {
-    auto& S = *Impl;
-    if (S.Status != EAngelIOState::Waiting || S.Scope.Pending || !S.Waiting.Equals(Name, ESearchCase::CaseSensitive)) return false;
-    S.Waiting.Reset();
-    S.Payload = Value;
-    return S.Execute();
+    return Impl->Advance(&Name, Value);
 }
 
 bool FAngelIOProgram::IsWaitingOnOperation() const
 {
-    return Impl->Status == EAngelIOState::Waiting && Impl->Scope.Pending.IsValid();
+    return Impl->NeedsTick();
 }
 
 bool FAngelIOProgram::ResumeCompletedOperation()
 {
-    if (!IsWaitingOnOperation()) return false;
-    auto& Scope = Impl->Scope;
+    return Impl->Advance(nullptr, 0);
+}
+
+bool FAngelIOProgram::FImpl::Advance(const FString* Signal, int32 Value)
+{
+    if (Status != EAngelIOState::Waiting) return false;
+    if (Signal && EndSignals.Contains(*Signal))
+    {
+        Status = EAngelIOState::Finished;
+        Children.Reset();
+        return true;
+    }
+    // Snapshot recipients before resuming their parent. New branches never receive the triggering signal twice.
+    const int32 Existing = Children.Num();
+    bool bChanged = false;
+    if (Signal && !Scope.Pending && Waiting.Equals(*Signal, ESearchCase::CaseSensitive))
+    {
+        Waiting.Reset();
+        Payload = Value;
+        if (!Execute()) return false;
+        bChanged = true;
+    }
+    else if (!Signal && Scope.Pending) bChanged = ResumeOperation();
+    if (Status != EAngelIOState::Waiting) return bChanged;
+    for (int32 I = 0; I < Existing; ++I)
+    {
+        const auto Child = Children[I];
+        bChanged |= Child->Advance(Signal, Value);
+        if (Child->Status == EAngelIOState::Failed)
+            return Fail(Child->BranchName + TEXT(": ") + Child->Messages.Last().Message, Child->Messages.Last().Line);
+    }
+    if (bChanged) Children.RemoveAll([](const auto& Child){ return Child->Status == EAngelIOState::Finished; });
+    return bChanged;
+}
+
+bool FAngelIOProgram::FImpl::ResumeOperation()
+{
     if (Scope.Condition) Scope.Condition->Poll();
     const bool bComplete = Scope.Pending->IsComplete();
     if (!bComplete && (!Scope.Deadline.IsSet() || !Scope.World.IsValid() ||
@@ -842,8 +970,8 @@ bool FAngelIOProgram::ResumeCompletedOperation()
     Scope.WaitSite.Reset();
     Scope.Pending.Reset();
     Scope.Condition.Reset();
-    Impl->Waiting.Reset();
-    return Impl->Execute();
+    Waiting.Reset();
+    return Execute();
 }
 
 const TArray<FString>& FAngelIOProgram::ExternalDeclarations() const { return Impl->ExternalAPI; }
@@ -865,6 +993,22 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     Info.Instance = Impl->Scope.InstanceId;
     Info.RestoredStage = Impl->RestoredStage;
     Info.RestoredVersion = Impl->RestoredVersion;
+    auto InspectChildren = [&](auto&& Visit, const FImpl& Parent) -> void
+    {
+        for (const auto& Child : Parent.Children)
+        {
+            int32 Line = 0;
+            for (asUINT Frame = 0; Frame < Child->Context->GetCallstackSize(); ++Frame)
+            {
+                const char* Section = nullptr;
+                Line = Child->Context->GetLineNumber(Frame, nullptr, &Section);
+                if (Section && Child->ScriptSection == UTF8_TO_TCHAR(Section)) break;
+            }
+            Info.BranchWaits.Add(FString::Printf(TEXT("%s · %s:%d · %s"), *Child->BranchName, *Child->ScriptSection, Line, *Child->Waiting));
+            Visit(Visit, *Child);
+        }
+    };
+    InspectChildren(InspectChildren, *Impl);
     if (Info.State != EAngelIOState::Waiting) return Info;
     Info.Waiting = Impl->Waiting;
     if (Impl->Scope.Pending) Info.Operation = Impl->Scope.Pending->GetOperationId();
