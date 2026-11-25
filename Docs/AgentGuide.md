@@ -59,13 +59,21 @@ Set the logical `TargetName` on the component. Renaming the actor in the Outline
 
 The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftTrip`, `TripResult`, `TripStatus`, the floor range, and the movement rules. A project that copies only `Plugins/AngelIO` supplies its own game provider. [Public extension interface](../Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Full binding implementation](../Source/AngelIOHost/AngelIOHost.cpp)
 
-1. Add `AngelIO` to the game's module dependencies. Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the provider with `IModularFeatures` in `StartupModule` and unregister it in `ShutdownModule`. Keep it loaded while its VMs exist. Each compile calls registration on a fresh engine, including the validation commandlet.
+1. Add `AngelIO` to the game's module dependencies. Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the provider with `IModularFeatures` in `StartupModule` before the first mission compiles. Keep it loaded until all consuming worlds and private validation programs have shut down, then unregister it in `ShutdownModule`.
 2. Register the script types, reference-count behaviors, enum values, functions, and methods. Return failure if a registration fails. The lift provider uses a weak actor reference for the target and a shared reference for the trip. A script can keep a result after the actor disappears. Obtain the executing world with `AngelIO::GetScriptWorld()` inside a binding.
 3. Create a new `FAngelIOOperation` for every invocation, including a rejected request. Pass the world, operation name, logical target, JSON arguments, and optionally the executing component or actor as `TraceTarget`. In the demo the target string is `FreightLift` and the object is its `Mission` component. That object lets the inspector associate a request with the exact executor even when names are shared or changed.
 4. Have the producer retain the pending operation. Save the domain result before calling `MarkComplete(Status, Reason)` on the game thread. Cover early rejection, synchronous completion, normal arrival and target teardown. A stale lift handle yields `Cancelled` with `TargetGone`. Destroying a moving lift yields `Cancelled` with `TargetEndPlay`. [Trip result](../Source/AngelIOHost/AngelIOLiftTrip.cpp) · [Producer lifecycle](../Source/AngelIOHost/AngelIOExampleLift.cpp)
 5. Implement the script's wait method with `AngelIO::AwaitOperation` on the same operation object. The timeout overload accepts an optional duration in game seconds and returns a shared outcome for this wait. Keep it in the script result handle. A completed operation returns inline, zero polls, and a positive deadline resumes on the first eligible game tick. Completion wins if both are observed on that tick. A timed-out `TripResult.Status` stays `TimedOut` after another reader gets `Arrived`. Stopping a waiter detaches that script. The producer and other waiters keep their references. [Independent waiters and trace retention tests](../Source/AngelIOHost/Tests/AngelIOOperationTraceTests.cpp)
 
 Rebuild the editor after changing a binding. Check the new signature in `describe_api.externalDeclarations`, compile a small caller, then exercise the behavior. The demo result exposes `Id`, `Floor` and `Status`. Reasons such as `LiftBusy` appear in the trace's `complete` event. Use `trip.Id` or `result.Id` to correlate the outcome with the native operation's `GetOperationId()`. Two invocations on the same actor and floor still have distinct IDs.
+
+### World-owned AngelScript engine
+
+From v0.7.0 the first mission compiled in an authority game world registers the core and game-module bindings. Each component gets its own module, globals, context, wait state and source diagnostics. `EndPlay` discards the room's modules. Even a world with zero remaining missions keeps its registered engine until teardown. Provider registration failure leaves the world free to retry with a fresh engine.
+
+For native gameplay callers use `Program.CompileFile(Path, World)` or `Program.Compile(Label, Source, World)` on the game thread. After compilation, `Program.Start(Inputs)` uses the bound world. Passing a different world fails. World teardown stops retained native programs, discards their modules and releases the engine. Compile again against the replacement world to start a fresh mission. Omitting the world at compile time selects a private engine for standalone callers, editor validation and MCP.
+
+`AngelIO.Network.ListenServer.StreamedTrips` counts calls to a real API provider while a host and client hide, unload and reload a room. It checks module counts, a fresh mission ID and the client's replicated arrival at floor 6. It then uses non-seamless `ServerTravel` to replace the world. The original engine is released, registration runs once in the new host, and the reconnected client requests and observes a ride to floor 4. The client world stays free of script engines. `AngelIO.Missions.WorldEngineOwnership` also exercises two live authority worlds, a rejected registration and a cross-world start.
 
 ### Streamed targets
 
@@ -255,7 +263,7 @@ To reproduce, use the Unreal Automation command above with `$filter = 'AngelIO.P
 
 #### Registering the API once for 1000 missions
 
-`AngelIO.Performance.SharedRegistration` compares two source builds of the same `TimedGate.as` workload in the same editor process. Each measured cohort pays for its first registration. In the shared cohort, each mission creates a uniquely named module and its own context on one engine. Every cohort performs 1000 file reads, 1000 source builds and zero bytecode loads. The game module and its native providers stay loaded through teardown. Engine sharing is enabled only inside editor automation.
+`AngelIO.Performance.SharedRegistration` compares two source builds of the same `TimedGate.as` workload in the same editor process. Each measured cohort pays for its first registration. In the shared cohort, each mission creates a uniquely named module and its own context on one engine. Every cohort performs 1000 file reads, 1000 source builds and zero bytecode loads. The game module and its native providers stay loaded through teardown. From v0.7.0 the shared cohort uses the gameplay path and the private cohort uses an automation override.
 
 On the same Win64 machine, checking out tag `v0.6.2` and rerunning its source benchmark gave **520.5 ms** (published mean **507.2 ms**). The table reports the six alternating pairs from the new editor run. Both paths used the same timers and exact-line checks. The sums below group the individual phase timings from the log.
 
@@ -272,12 +280,12 @@ On the same Win64 machine, checking out tag `v0.6.2` and rerunning its source be
 | Component and loop overhead | 15.3 | 14.4 |
 | **Total** | **488.9** | **237.6** |
 
-One registration saved **251.4 ms (51.4%)** on average. Every paired run saved time, from 243.3 to 256.1 ms. This result supports testing a world-owned engine for runtime use. Streaming, world teardown and provider lifetime in a packaged game are the next acceptance cases.
+One registration saved **251.4 ms (51.4%)** on average in v0.6.3. Every paired run saved time, from 243.3 to 256.1 ms.
 
 To reproduce the timing in isolation, set `$filter = 'AngelIO.Performance.SharedRegistration'` in the automation command above. Two separate tests cover behavior outside the timed loop.
 
 - `AngelIO.Missions.SharedRegistrationIsolation` starts 1000 instances of `Elevator.as` with distinct starting floors. It leaves one group idle, holds one in motion and completes one trip in each remaining instance. It checks every floor, trip count, wait, mission ID and source line (18 or 25), and checks diagnostic ownership after a sibling fails to compile.
-- `AngelIO.Network.ListenServer.SharedRegistrationInspector` restarts both player panels on one engine. The live inspector selects the client replica at `TypedLift.as:22` and the host panel at `TypedLift.as:11`. The host handles a rejected call and stops. The surviving panel completes its own ride, replicates floor 4 to the client and returns to line 11. The last panel releases the engine.
+- `AngelIO.Network.ListenServer.SharedRegistrationInspector` restarts both player panels on the world's engine. The live inspector selects the client replica at `TypedLift.as:22` and the host panel at `TypedLift.as:11`. The host handles a rejected call and stops. The surviving panel completes its own ride, replicates floor 4 to the client and returns to line 11. Stopping both panels leaves the engine available to the world.
 
 The inspector now records the executing line when a native or signal wait begins. For example, an active timer in `TimedGate.as` shows line 6, even though the suspended SDK context has already advanced to line 7.
 
@@ -290,7 +298,7 @@ To reproduce the packaged checks, set `$engine` to the Unreal installation direc
 ```powershell
 $project = (Resolve-Path AngelIO.uproject).Path
 foreach ($config in 'Development', 'Shipping') {
-    $stage = Join-Path $PWD "Saved/AngelIO/Packages/0.6.1/$config"
+    $stage = Join-Path $PWD "Saved/AngelIO/Packages/0.7.0/$config"
     & "$engine/Engine/Build/BatchFiles/RunUAT.bat" BuildCookRun "-project=$project" -target=AngelIOHost -platform=Win64 "-clientconfig=$config" -build -cook -stage -pak -iostore -package '-map=/Game/Demo/TwoLifts+/Game/Tests/PartitionLift' "-stagingdirectory=$stage" -AdditionalCookerOptions=-SkipZenStore -ddc=InstalledNoZenLocalFallback -nop4 -unattended
     if ($LASTEXITCODE) { throw "Packaging failed for $config" }
     $game = if ($config -eq 'Shipping') { 'AngelIOHost-Win64-Shipping.exe' } else { 'AngelIOHost.exe' }

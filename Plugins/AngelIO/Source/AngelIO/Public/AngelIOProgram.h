@@ -5,6 +5,7 @@
 
 class UWorld;
 class UActorComponent;
+class UAngelIOScriptWorldSubsystem;
 
 UENUM(BlueprintType)
 enum class EAngelIOType : uint8 { Integer, Float, Boolean };
@@ -95,9 +96,12 @@ class ANGELIO_API FAngelIOProgram
 public:
     FAngelIOProgram();
     ~FAngelIOProgram();
+    FAngelIOProgram(const FAngelIOProgram&) = delete;
+    FAngelIOProgram& operator=(const FAngelIOProgram&) = delete;
 
-    bool CompileFile(const FString& RelativeScript);
-    bool Compile(const FString& Label, const FString& Source);
+    // Supply the authority world to share its registered engine. Worldless compilation is isolated for tools.
+    bool CompileFile(const FString& RelativeScript, UWorld* World = nullptr);
+    bool Compile(const FString& Label, const FString& Source, UWorld* World = nullptr);
     bool Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World = nullptr, UActorComponent* Component = nullptr);
     bool SetInput(const FString& Name, const FAngelIOValue& Value);
     bool GetOutput(const FString& Name, FAngelIOValue& Value) const;
@@ -119,7 +123,11 @@ public:
 
 private:
     friend class UAngelIOScriptComponent;
+    friend class UAngelIOScriptWorldSubsystem;
     void DetachComponent();
+    void UnbindWorld();
+    void EndWorld();
+    UAngelIOScriptWorldSubsystem* WorldOwner = nullptr; // Unlinked on either owner's destruction.
     struct FImpl;
-    TUniquePtr<FImpl> Impl;
+    TSharedPtr<FImpl> Impl;
 };

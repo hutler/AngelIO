@@ -3,11 +3,13 @@
 #include "../AngelIOExampleLift.h"
 #include "../AngelIOLiftTrip.h"
 #include "../AngelIOPlayerController.h"
+#include "AngelIOScriptAPI.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOTraceSubsystem.h"
 #include "SAngelIOMissionInspector.h"
 #include "Tests/AngelIOStartupProbe.h"
+#include "Features/IModularFeatures.h"
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Dom/JsonObject.h"
@@ -313,9 +315,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOStreamedTrips, "AngelIO.Network.ListenS
 bool FAngelIOStreamedTrips::RunTest(const FString&)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
-    StartListenSession(TEXT("/Engine/Maps/Entry"));
-    struct FRoom
+    struct FRoom final : IAngelIOScriptAPI
     {
+        FRoom() { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
+        ~FRoom() { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
+        bool RegisterBindings(asIScriptEngine&) override { ++Registrations; return true; }
+        int32 Registrations = 0, PersistentModules = 0;
+        TWeakPtr<FAngelIORegisteredEngine> OriginalEngine;
+        TWeakObjectPtr<UWorld> OriginalWorld;
+        FGuid OriginalMission;
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
         TWeakObjectPtr<AAngelIOExampleLift> Original;
         FVector FloorTwoLocation = FVector::ZeroVector;
@@ -327,6 +335,7 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
         }
     };
     const auto Room = MakeShared<FRoom>();
+    StartListenSession(TEXT("/Engine/Maps/Entry"));
     const auto Steps = ListenSteps(this);
     Steps(TEXT("persistent caller starts before the room streams in"), [this, Room]
     {
@@ -352,8 +361,15 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
                 out_Arrived = shown.MoveTo(8, 100).Wait().Status == TripStatus::Cancelled &&
                     FindLift("FreightLift").MoveTo(6, 800).Wait().Status == TripStatus::Arrived;
             })");
-        if (!TestTrue(TEXT("Lookup is empty before loading"), Room->Caller.Compile(TEXT("StreamedLift.as"), Source) &&
+        auto* PC = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || PC->TripPanel->GetWaitingSignal() != TEXT("CallLift")) return false;
+        if (!TestTrue(TEXT("Lookup is empty before loading"), Room->Caller.Compile(TEXT("StreamedLift.as"), Source, Host) &&
             Room->Caller.Start({}, Host) && Room->Output(TEXT("Absent")))) return true;
+        Room->OriginalWorld = Host;
+        Room->OriginalEngine = FAngelIOStartupProbe::WorldEngine(Host);
+        Room->PersistentModules = FAngelIOStartupProbe::WorldModuleCount(Host);
+        TestTrue(TEXT("Host owns a registered engine"), Room->OriginalEngine.IsValid());
+        TestFalse(TEXT("Client replica has no script engine"), FAngelIOStartupProbe::WorldEngine(Client).IsValid());
         Room->Host = LoadLiftRoom(Host);
         Room->Client = LoadLiftRoom(Client);
         TestTrue(TEXT("Dynamic room requested on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
@@ -364,6 +380,8 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
         auto* Host = FindPeer(NM_ListenServer);
         if (!AtFloor(Host, 2, 2, 1) || !AtFloor(FindPeer(NM_Client), 2, 2, 1)) return false;
         Room->Original = FindLift(Host, 2);
+        Room->OriginalMission = Room->Original->Mission->InspectMission().Instance;
+        TestTrue(TEXT("Room missions have their own modules"), FAngelIOStartupProbe::WorldModuleCount(Host) > Room->PersistentModules);
         Room->FloorTwoLocation = Room->Original->GetActorLocation();
         TestTrue(TEXT("Persistent caller is awaiting the ride"), Room->Caller.Signal(TEXT("Loaded"), 0) &&
             Room->Caller.IsWaitingOnOperation());
@@ -400,6 +418,8 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
     Steps(TEXT("fully unload the room on both peers"), [this, Room]
     {
         if (Room->Host->GetLoadedLevel() || Room->Client->GetLoadedLevel()) return false;
+        TestEqual(TEXT("Unloading the room discards only its script modules"),
+            FAngelIOStartupProbe::WorldModuleCount(FindPeer(NM_ListenServer)), Room->PersistentModules);
         TestTrue(TEXT("Registry has no freight lift after unload"),
             FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTargetRegistry>()->FindTargets(TEXT("FreightLift")).IsEmpty());
         for (auto Stream : {Room->Host, Room->Client})
@@ -412,6 +432,10 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
     Steps(TEXT("resolve the reloaded actor and start another ride"), [this, Room]
     {
         if (!AtFloor(FindPeer(NM_ListenServer), 2, 2, 0) || !AtFloor(FindPeer(NM_Client), 2, 2, 0)) return false;
+        auto* Host = FindPeer(NM_ListenServer);
+        TestTrue(TEXT("Reload uses the original world engine"), Room->OriginalEngine.Pin() == FAngelIOStartupProbe::WorldEngine(Host).Pin());
+        TestEqual(TEXT("Room hide, unload and reload registered the API once in total"), Room->Registrations, 1);
+        TestNotEqual(TEXT("Reloaded lift has a fresh mission"), FindLift(Host, 2)->Mission->InspectMission().Instance, Room->OriginalMission);
         TestTrue(TEXT("New ride awaits completion"), Room->Caller.Signal(TEXT("Reloaded"), 0) && Room->Caller.IsWaitingOnOperation());
         return true;
     });
@@ -441,7 +465,28 @@ bool FAngelIOStreamedTrips::RunTest(const FString&)
         });
         TestEqual(TEXT("One interrupted ride"), Unloaded, 1);
         TestEqual(TEXT("Each stale call has its own TargetGone result"), Gone, 3);
+        // Relative travel carries the current PIE listen port into the replacement world.
+        TestTrue(TEXT("Listen host accepts world travel"), Host->ServerTravel(TEXT("/Game/Demo/TwoLifts")));
         return true;
+    });
+    Steps(TEXT("reconnect to the replacement world and request a ride"), [this, Room]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || Host == Room->OriginalWorld.Get() || !AtFloor(Host, 2, 2, 1) || !AtFloor(Client, 2, 2, 1)) return false;
+        auto* PC = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || PC->TripPanel->GetWaitingSignal() != TEXT("CallLift") || !PC->GetNetConnection()) return false;
+        TestFalse(TEXT("World teardown released the original engine"), Room->OriginalEngine.IsValid());
+        TestTrue(TEXT("Native caller retained across travel is invalidated"), Room->Caller.State() == EAngelIOState::Failed);
+        TestTrue(TEXT("Replacement world owns an engine"), FAngelIOStartupProbe::WorldEngine(Host).IsValid());
+        TestFalse(TEXT("Reconnected client has no script engine"), FAngelIOStartupProbe::WorldEngine(Client).IsValid());
+        TestEqual(TEXT("Each authority world registered the provider exactly once"), Room->Registrations, 2);
+        PC->LiftTrip(4, 800);
+        return true;
+    });
+    Steps(TEXT("replacement world executes the client trip"), []
+    {
+        return AtFloor(FindPeer(NM_ListenServer), 2, 4, 2) && AtFloor(FindPeer(NM_Client), 2, 4, 2);
     });
     EndListenSession();
     return true;
@@ -1505,7 +1550,7 @@ bool FAngelIOSharedInspectorPIE::RunTest(const FString&)
     struct FPanels
     {
         TWeakObjectPtr<UAngelIOScriptComponent> Local, Remote, Replica;
-        TWeakPtr<FAngelIOBenchmarkEngine> Engine;
+        TWeakPtr<FAngelIORegisteredEngine> Engine;
     };
     const auto Panels = MakeShared<FPanels>();
     const auto Inspector = SNew(SAngelIOMissionInspector);
@@ -1525,11 +1570,10 @@ bool FAngelIOSharedInspectorPIE::RunTest(const FString&)
         Panels->Replica = PC->TripPanel.Get();
         {
             FAngelIOStartupProbe Probe;
-            Probe.bShareRegistrations = true;
             TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
             if (!TestTrue(TEXT("Both panels started"), Panels->Local->StartScript() && Panels->Remote->StartScript()) ||
-                !TestEqual(TEXT("Registered the lift provider cohort once"), Probe.Registrations, 1)) return true;
-            Panels->Engine = Probe.SharedEngine;
+                !TestEqual(TEXT("Restarted panels reuse the world's registered API"), Probe.Registrations, 0)) return true;
+            Panels->Engine = FAngelIOStartupProbe::WorldEngine(Host);
         }
         PC->LiftTrip(4, 200);
         return true;
@@ -1560,7 +1604,7 @@ bool FAngelIOSharedInspectorPIE::RunTest(const FString&)
         TestEqual(TEXT("Surviving panel resumes at the correct line"), Inspector->Location, FString(TEXT("TypedLift.as:11")));
         TestEqual(TEXT("Surviving panel is ready for input"), Inspector->Inspection.Waiting, FString(TEXT("CallLift")));
         Panels->Remote->StopScript();
-        TestFalse(TEXT("Last stopped panel releases the shared engine"), Panels->Engine.IsValid());
+        TestTrue(TEXT("World retains the registered engine after both panels stop"), Panels->Engine.IsValid());
         return true;
     });
     EndListenSession();

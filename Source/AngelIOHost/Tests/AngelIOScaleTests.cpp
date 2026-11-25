@@ -1,5 +1,7 @@
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 #include "AngelIOScriptComponent.h"
+#include "AngelIOScriptAPI.h"
+#include "Features/IModularFeatures.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/PlatformMemory.h"
@@ -78,7 +80,7 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
         World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
         FAngelIOStartupProbe Probe;
         Probe.bReuseBytecode = bCandidate && !bCompareRegistrations;
-        Probe.bShareRegistrations = bCandidate && bCompareRegistrations;
+        Probe.bForcePrivateEngine = !(bCandidate && bCompareRegistrations);
         TArray<UAngelIOScriptComponent*> Missions;
         Missions.Reserve(Count);
         uint64 Spawn = 0, File = 0, Engine = 0, Core = 0, Providers = 0, Sections = 0;
@@ -134,7 +136,7 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
             !Test.TestEqual(TEXT("Last mission script"), Last.Script, First.Script) ||
             !Test.TestEqual(TEXT("First TimedGate wait line"), First.Line, 6) ||
             !Test.TestEqual(TEXT("Last TimedGate wait line"), Last.Line, 6) ||
-            !Test.TestEqual(TEXT("API registrations"), Probe.Registrations, Probe.bShareRegistrations ? 1 : Count) ||
+            !Test.TestEqual(TEXT("API registrations"), Probe.Registrations, Probe.bForcePrivateEngine ? Count : 1) ||
             !Test.TestEqual(TEXT("Source builds"), Probe.Builds, Probe.bReuseBytecode ? 1 : Count) ||
             !Test.TestEqual(TEXT("Bytecode loads"), Probe.Loads, Probe.bReuseBytecode ? Count - 1 : 0))
             return false;
@@ -142,7 +144,7 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
         if (Pair > 0)
         {
             auto Ms = [](uint64 Cycles) { return FPlatformTime::ToMilliseconds64(Cycles); };
-            const TCHAR* Mode = Probe.bShareRegistrations ? TEXT("shared_api") : Probe.bReuseBytecode ? TEXT("bytecode") : TEXT("source");
+            const TCHAR* Mode = !Probe.bForcePrivateEngine ? TEXT("shared_api") : Probe.bReuseBytecode ? TEXT("bytecode") : TEXT("source");
             Test.AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d registrations=%d builds=%d loads=%d bytes=%d ")
                 TEXT("total_ms=%.3f spawn_ms=%.3f file_ms=%.3f engine_ms=%.3f core_ms=%.3f ")
                 TEXT("providers_ms=%.3f sections_ms=%.3f module_ms=%.3f ")
@@ -167,14 +169,56 @@ static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations
 bool FAngelIOMissionStartup::RunTest(const FString&) { return CompareStartup(*this, false); }
 bool FAngelIORegistrationStartup::RunTest(const FString&) { return CompareStartup(*this, true); }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOWorldOwnership, "AngelIO.Missions.WorldEngineOwnership",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOWorldOwnership::RunTest(const FString&)
+{
+    struct FProvider final : IAngelIOScriptAPI
+    {
+        int32 Attempts = 0;
+        FProvider() { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
+        ~FProvider() { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
+        bool RegisterBindings(asIScriptEngine&) override { return ++Attempts > 1; }
+    } Provider;
+    FTestWorldWrapper First, Second;
+    if (!First.CreateTestWorld(EWorldType::Game) || !Second.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* A = First.GetTestWorld();
+    UWorld* B = Second.GetTestWorld();
+    const FString Label = TEXT("World.as"), Source = TEXT("int out_Value = 3; void Run() { out_Value++; }");
+    {
+        FAngelIOProgram Retry;
+        if (!TestFalse(TEXT("The provider rejected its first registration"), Retry.Compile(Label, Source, A)) ||
+            !TestFalse(TEXT("Failed registration was never published"), FAngelIOStartupProbe::WorldEngine(A).IsValid()) ||
+            !TestTrue(TEXT("Retry builds with a fresh engine"), Retry.Compile(Label, Source, A)) ||
+            !TestFalse(TEXT("A mission cannot start in a different world"), Retry.Start({}, B))) return false;
+    }
+    const auto Original = FAngelIOStartupProbe::WorldEngine(A);
+    if (!TestTrue(TEXT("An empty world retains its registered API"), Original.IsValid()) ||
+        !TestEqual(TEXT("Stopped mission discarded its module"), FAngelIOStartupProbe::WorldModuleCount(A), 0)) return false;
+
+    FAngelIOProgram One, Two;
+    if (!One.Compile(Label, Source, A) || !Two.Compile(Label, Source, B) ||
+        !TestTrue(TEXT("Concurrent worlds own distinct engines"), Original.Pin() != FAngelIOStartupProbe::WorldEngine(B).Pin()) ||
+        !TestEqual(TEXT("One failed attempt plus one successful registration per world"), Provider.Attempts, 3)) return false;
+    if (!First.DestroyTestWorld(true)) return false;
+    FAngelIOValue Output;
+    return TestFalse(TEXT("First world released its engine"), Original.IsValid()) &&
+        TestFalse(TEXT("Its precompiled mission cannot start after teardown"), One.Start({})) &&
+        TestTrue(TEXT("Second world can still execute its globals"), Two.Start({}) &&
+            Two.GetOutput(TEXT("Value"), Output) && Output.Integer == 4);
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedIsolation, "AngelIO.Missions.SharedRegistrationIsolation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FAngelIOSharedIsolation::RunTest(const FString&)
 {
     constexpr int32 Count = 1000;
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
+    UWorld* World = Scene.GetTestWorld();
     FAngelIOStartupProbe Probe;
-    Probe.bShareRegistrations = true;
     TArray<TUniquePtr<FAngelIOProgram>> Missions;
     for (int32 I = 0; I < Count; ++I)
     {
@@ -182,7 +226,7 @@ bool FAngelIOSharedIsolation::RunTest(const FString&)
         FAngelIOValue Floor;
         Floor.Integer = I + 1;
         TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
-        if (!Mission->CompileFile(TEXT("Elevator.as")) || !Mission->Start({{TEXT("StartingFloor"), Floor}}))
+        if (!Mission->CompileFile(TEXT("Elevator.as"), World) || !Mission->Start({{TEXT("StartingFloor"), Floor}}))
         {
             AddError(FString::Printf(TEXT("Could not start shared mission %d"), I));
             return false;
@@ -193,13 +237,12 @@ bool FAngelIOSharedIsolation::RunTest(const FString&)
     {
         FAngelIOProgram Invalid;
         TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
-        if (!TestFalse(TEXT("A sibling module can fail to build"), Invalid.Compile(TEXT("Invalid.as"), TEXT("void Run() {\nUnknown();\n}"))) ||
+        if (!TestFalse(TEXT("A sibling module can fail to build"), Invalid.Compile(TEXT("Invalid.as"), TEXT("void Run() {\nUnknown();\n}"), World)) ||
             !TestTrue(TEXT("The failing module owns its diagnostic"), Invalid.Diagnostics().ContainsByPredicate(
                 [](const auto& D) { return D.Severity == TEXT("error") && D.Line == 2; })) ||
             !TestTrue(TEXT("A valid sibling retains clean diagnostics"), Missions.Last()->Diagnostics().IsEmpty())) return false;
     }
-    const TWeakPtr<FAngelIOBenchmarkEngine> Lifetime = Probe.SharedEngine;
-    Probe.SharedEngine.Reset();
+    const auto Lifetime = FAngelIOStartupProbe::WorldEngine(World);
     for (int32 I = 0; I < Count; ++I)
     {
         // Leave one group idle, one in motion and one back at the first wait after a completed trip.
@@ -223,8 +266,12 @@ bool FAngelIOSharedIsolation::RunTest(const FString&)
         }
         Instances.Add(Site.Instance);
     }
-    Missions.Reset();
-    return TestEqual(TEXT("Distinct mission IDs"), Instances.Num(), Count) &&
-        TestFalse(TEXT("Releasing the final mission releases its registered engine"), Lifetime.IsValid());
+    if (!TestEqual(TEXT("Distinct mission IDs"), Instances.Num(), Count)) return false;
+    Missions.SetNum(1);
+    if (!TestEqual(TEXT("Only the retained native mission module remains"), FAngelIOStartupProbe::WorldModuleCount(World), 1)) return false;
+    if (!Scene.DestroyTestWorld(true)) return false;
+    return TestFalse(TEXT("World teardown releases the registered engine"), Lifetime.IsValid()) &&
+        TestTrue(TEXT("Retained native program stops at world teardown"), Missions[0]->State() == EAngelIOState::Failed &&
+            !Missions[0]->Signal(TEXT("RequestFloor"), 4));
 }
 #endif

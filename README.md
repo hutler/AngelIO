@@ -155,7 +155,9 @@ Add `AngelIO` to the dependencies in your module's `Build.cs` to use the compone
 
 ### Expose types from a game module
 
-Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the provider with `IModularFeatures` during `StartupModule` and unregister it during `ShutdownModule`. AngelIO calls the provider for each new VM, including the validation commandlet's VM. Keep the module loaded for the lifetime of its VMs. [Provider interface](Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Demo bindings](Source/AngelIOHost/AngelIOHost.cpp)
+Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)` and register the provider with `IModularFeatures` during `StartupModule`. The first runtime mission in each authority world registers the API. Every mission compiles into a separate module with its own globals, context and waits. Unloading a streamed room releases its modules. Reloading the room reuses the world's registered API. A replacement world registers its own engine on first use. Client replicas read replicated state. [World lifetime and native callers](Docs/AgentGuide.md#world-owned-angelscript-engine)
+
+Keep providers loaded through teardown of the worlds and validation programs using their bindings. Unregister them in `ShutdownModule`. The editor validator and MCP commandlets compile on private engines with the providers loaded in their process. [Provider interface](Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Demo bindings](Source/AngelIOHost/AngelIOHost.cpp)
 
 Inside a native binding, `AngelIO::GetScriptWorld()` gives access to the current mission's world. For a long-running action, store the result in a type derived from `FAngelIOOperation`. Write the result and call `MarkComplete()` on the game thread. Pass the same operation to `AngelIO::AwaitOperation` when the script waits. The component checks completion on its tick while that wait is active. Stopping the caller releases its wait. The lift continues to own any ride it has already started. [Lift implementation](Source/AngelIOHost/AngelIOExampleLift.cpp)
 
@@ -272,7 +274,7 @@ The release guide includes measured startup, memory and frame cost for 1–1000 
 
 For 1000 instances of the same mission, the guide also breaks down actor creation, API registration, compilation and VM startup, and measures the saving from loading bytecode. [Startup profile](Docs/AgentGuide.md#where-startup-time-goes)
 
-An editor experiment reduced the mean startup time for those 1000 missions from 488.9 to 237.6 ms by registering the API once. The guide includes the paired benchmark and multiplayer isolation checks. [Shared registration results](Docs/AgentGuide.md#registering-the-api-once-for-1000-missions)
+The v0.6.3 editor experiment reduced mean startup time for those 1000 missions from 488.9 to 237.6 ms by registering the API once. Runtime mission components use world-owned registration by default from v0.7.0. [Shared registration results](Docs/AgentGuide.md#registering-the-api-once-for-1000-missions)
 
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor

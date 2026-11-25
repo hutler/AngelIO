@@ -2,6 +2,7 @@
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOScriptAPI.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIOScriptWorldSubsystem.h"
 #include "AngelIOTraceSubsystem.h"
 #include "Components/ActorComponent.h"
 #include "Dom/JsonObject.h"
@@ -10,10 +11,10 @@
 #include "Features/IModularFeatures.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include <string_view>
 #include <algorithm>
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-#include "Misc/ScopeExit.h"
 #include "Tests/AngelIOStartupProbe.h"
 #define ANGELIO_BENCHMARK_MARK(Field) FAngelIOStartupProbe::Mark(&FAngelIOStartupProbe::Field)
 #else
@@ -251,27 +252,44 @@ struct FAngelIOModuleBindings
 #endif
 };
 
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-// Owned by this cohort and its live mission modules. Providers stay loaded throughout the experiment.
-struct FAngelIOBenchmarkEngine
+struct FAngelIORegisteredEngine
 {
     asIScriptEngine* Engine;
     FAngelIOModuleBindings Bindings;
     TArray<FString> Declarations;
-    uint32 NextModule = 0;
+    uint64 NextModule = 0;
 
-    explicit FAngelIOBenchmarkEngine(asIScriptEngine* InEngine) : Engine(InEngine) {}
-    ~FAngelIOBenchmarkEngine() { Engine->ShutDownAndRelease(); }
+    explicit FAngelIORegisteredEngine(asIScriptEngine* InEngine) : Engine(InEngine) {}
+    ~FAngelIORegisteredEngine() { Engine->ShutDownAndRelease(); }
 };
+
+void UAngelIOScriptWorldSubsystem::Deinitialize()
+{
+    bClosing = true;
+    while (!Programs.IsEmpty()) (*Programs.CreateConstIterator())->EndWorld();
+    RegisteredEngine.Reset();
+    Super::Deinitialize();
+}
+
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+TWeakPtr<FAngelIORegisteredEngine> FAngelIOStartupProbe::WorldEngine(UWorld* World)
+{
+    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
+    return Owner ? Owner->RegisteredEngine : nullptr;
+}
+
+int32 FAngelIOStartupProbe::WorldModuleCount(UWorld* World)
+{
+    auto Registered = WorldEngine(World).Pin();
+    return Registered ? int32(Registered->Engine->GetModuleCount()) : 0;
+}
 #endif
 
 struct FAngelIOProgram::FImpl
 {
     asIScriptEngine* Engine = nullptr;
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-    TSharedPtr<FAngelIOBenchmarkEngine> SharedEngine;
-    bool PrepareSharedModule(FAngelIOStartupProbe& Probe, FAngelIOModuleBindings& Bindings);
-#endif
+    TSharedPtr<FAngelIORegisteredEngine> SharedEngine;
+    bool PrepareWorldModule(UAngelIOScriptWorldSubsystem& Owner, FAngelIOModuleBindings& Bindings);
     bool RegisterAPI(FAngelIOModuleBindings& Bindings);
     asIScriptModule* Module = nullptr;
     asIScriptContext* Context = nullptr;
@@ -416,6 +434,12 @@ struct FAngelIOProgram::FImpl
         for (const auto& Child : Children) Child->DetachOwner();
     }
 
+    void AbortActiveContexts()
+    {
+        if (Context && Context->GetState() == asEXECUTION_ACTIVE) Context->Abort();
+        for (const auto& Child : Children) Child->AbortActiveContexts();
+    }
+
     ~FImpl()
     {
         Children.Reset();
@@ -426,12 +450,10 @@ struct FAngelIOProgram::FImpl
         if (Scope.Condition) Scope.Condition->Detach();
         if (Context) Context->Release();
         if (Root) --Root->ChildCount;
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
         else if (SharedEngine)
         {
             if (Module) Module->Discard();
         }
-#endif
         else if (Engine) Engine->ShutDownAndRelease();
     }
 
@@ -791,15 +813,30 @@ struct FAngelIOProgram::FImpl
     bool Advance(const FString* Signal, int32 Value);
 };
 
-FAngelIOProgram::FAngelIOProgram() : Impl(MakeUnique<FImpl>()) {}
-FAngelIOProgram::~FAngelIOProgram() = default;
+FAngelIOProgram::FAngelIOProgram() : Impl(MakeShared<FImpl>()) {}
+FAngelIOProgram::~FAngelIOProgram() { UnbindWorld(); }
+
+void FAngelIOProgram::UnbindWorld()
+{
+    if (WorldOwner) WorldOwner->Programs.Remove(this);
+    WorldOwner = nullptr;
+}
+
+void FAngelIOProgram::EndWorld()
+{
+    UnbindWorld();
+    Impl->AbortActiveContexts();
+    Impl->DetachOwner();
+    Impl = MakeShared<FImpl>();
+    Impl->Fail(TEXT("Mission world ended"));
+}
 
 void FAngelIOProgram::DetachComponent()
 {
     Impl->DetachOwner();
 }
 
-bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
+bool FAngelIOProgram::CompileFile(const FString& RelativeScript, UWorld* World)
 {
     ANGELIO_BENCHMARK_MARK(FileBegin);
     const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("AngelIO"));
@@ -809,10 +846,11 @@ bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
         !FPaths::IsUnderDirectory(Path, Root) || !FPaths::GetExtension(Path).Equals(TEXT("as"), ESearchCase::IgnoreCase) ||
         !FFileHelper::LoadFileToString(Source, *Path))
     {
-        Impl = MakeUnique<FImpl>();
+        UnbindWorld();
+        Impl = MakeShared<FImpl>();
         return Impl->Fail(TEXT("Cannot read .as under Content/AngelIO: ") + RelativeScript);
     }
-    return Compile(RelativeScript, Source);
+    return Compile(RelativeScript, Source, World);
 }
 
 bool FAngelIOProgram::FImpl::RegisterAPI(FAngelIOModuleBindings& Bindings)
@@ -884,20 +922,22 @@ bool FAngelIOProgram::FImpl::RegisterAPI(FAngelIOModuleBindings& Bindings)
     return true;
 }
 
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-bool FAngelIOProgram::FImpl::PrepareSharedModule(FAngelIOStartupProbe& Probe, FAngelIOModuleBindings& Bindings)
+bool FAngelIOProgram::FImpl::PrepareWorldModule(UAngelIOScriptWorldSubsystem& Owner, FAngelIOModuleBindings& Bindings)
 {
-    if (!Probe.SharedEngine)
+    if (!Owner.RegisteredEngine)
     {
+        if (Owner.bRegistering) return Fail(TEXT("Recursive world API registration"));
+        TGuardValue<bool> Guard(Owner.bRegistering, true);
         if (!RegisterAPI(Bindings)) return false;
-        SharedEngine = MakeShared<FAngelIOBenchmarkEngine>(Engine);
+        if (Owner.bClosing) return Fail(TEXT("Mission world ended during API registration"));
+        SharedEngine = MakeShared<FAngelIORegisteredEngine>(Engine);
         SharedEngine->Bindings = Bindings;
         SharedEngine->Declarations = ExternalAPI;
-        Probe.SharedEngine = SharedEngine;
+        Owner.RegisteredEngine = SharedEngine;
     }
     else
     {
-        SharedEngine = Probe.SharedEngine;
+        SharedEngine = Owner.RegisteredEngine;
         Engine = SharedEngine->Engine;
         ANGELIO_BENCHMARK_MARK(EngineCreated);
         ANGELIO_BENCHMARK_MARK(CoreRegistered);
@@ -907,29 +947,35 @@ bool FAngelIOProgram::FImpl::PrepareSharedModule(FAngelIOStartupProbe& Probe, FA
         Bindings = SharedEngine->Bindings; // Map validation may remove shadowed names from this copy.
         ANGELIO_BENCHMARK_MARK(ProvidersInspected);
     }
-    const FString Name = FString::Printf(TEXT("mission_%u"), ++SharedEngine->NextModule);
+    const FString Name = FString::Printf(TEXT("mission_%llu"), ++SharedEngine->NextModule);
     Module = Engine->GetModule(TCHAR_TO_UTF8(*Name), asGM_ALWAYS_CREATE);
     return Module || Fail(TEXT("Could not create shared engine mission module"));
 }
-#endif
 
-bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
+bool FAngelIOProgram::Compile(const FString& Label, const FString& Source, UWorld* World)
 {
     ANGELIO_BENCHMARK_MARK(CompileBegin);
-    Impl = MakeUnique<FImpl>();
-    auto& S = *Impl;
+    UnbindWorld();
+    Impl = MakeShared<FImpl>();
+    const auto Compiling = Impl; // A native provider may trigger teardown.
+    auto& S = *Compiling;
     S.ScriptSection = Label;
     FAngelIOModuleBindings Bindings;
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
     // The SDK callback is engine-wide. Keep the per-mission destination only for this compile.
     ON_SCOPE_EXIT { if (S.SharedEngine) S.Engine->ClearMessageCallback(); };
-    auto* Probe = FAngelIOStartupProbe::Current();
-    if (Probe && Probe->bShareRegistrations)
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    if (auto* Probe = FAngelIOStartupProbe::Current(); Probe && Probe->bForcePrivateEngine) World = nullptr;
+#endif
+    if (World)
     {
-        if (!S.PrepareSharedModule(*Probe, Bindings)) return false;
+        auto* Owner = World->GetSubsystem<UAngelIOScriptWorldSubsystem>();
+        if (!Owner || Owner->bClosing || World->bIsTearingDown || World->GetNetMode() == NM_Client)
+            return S.Fail(TEXT("Mission compilation requires a live authority game world"));
+        WorldOwner = Owner;
+        Owner->Programs.Add(this);
+        if (!S.PrepareWorldModule(*Owner, Bindings)) return false;
     }
     else
-#endif
     {
         if (!S.RegisterAPI(Bindings)) return false;
         S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
@@ -962,13 +1008,20 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     S.ReadPortDefaults({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
 #endif
     ANGELIO_BENCHMARK_MARK(CompileEnd);
-    return true;
+    return Compiling == Impl;
 }
 
 bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* World, UActorComponent* Component)
 {
-    auto& S = *Impl;
+    const auto Running = Impl;
+    auto& S = *Running;
     if (S.Status != EAngelIOState::Compiled) return false;
+    if (WorldOwner)
+    {
+        if (!World) World = WorldOwner->GetWorld();
+        if (WorldOwner->GetWorld() != World || (Component && Component->GetWorld() != World))
+            return S.Fail(TEXT("Mission compiled for a different world"));
+    }
     if (World && World->GetNetMode() == NM_Client) return S.Fail(TEXT("Mission requires authority"));
     S.Scope.World = World;
     S.Scope.Component = Component;
@@ -979,6 +1032,7 @@ bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* 
     if (S.Context->SetLineCallback(asFUNCTION(FImpl::Line), &S, asCALL_CDECL) < 0 ||
         S.Module->ResetGlobalVars(S.Context) < 0)
         return S.Fail(TEXT("Failed to initialize script globals"));
+    if (Running != Impl) return false;
     S.Status = EAngelIOState::Running;
     for (const auto& Entry : Inputs)
     {
@@ -989,7 +1043,7 @@ bool FAngelIOProgram::Start(const TMap<FString, FAngelIOValue>& Inputs, UWorld* 
         return S.Fail(TEXT("Could not prepare Run"));
     const bool bStarted = S.Execute();
     ANGELIO_BENCHMARK_MARK(StartEnd);
-    return bStarted;
+    return bStarted && Running == Impl;
 }
 
 bool FAngelIOProgram::SetInput(const FString& Name, const FAngelIOValue& Value)
@@ -1028,7 +1082,8 @@ bool FAngelIOProgram::GetOutput(const FString& Name, FAngelIOValue& Value) const
 
 bool FAngelIOProgram::Signal(const FString& Name, int32 Value)
 {
-    return Impl->Advance(&Name, Value);
+    const auto Running = Impl;
+    return Running->Advance(&Name, Value) && Running == Impl;
 }
 
 bool FAngelIOProgram::IsWaitingOnOperation() const
@@ -1038,7 +1093,8 @@ bool FAngelIOProgram::IsWaitingOnOperation() const
 
 bool FAngelIOProgram::ResumeCompletedOperation()
 {
-    return Impl->Advance(nullptr, 0);
+    const auto Running = Impl;
+    return Running->Advance(nullptr, 0) && Running == Impl;
 }
 
 bool FAngelIOProgram::FImpl::Advance(const FString* Signal, int32 Value)

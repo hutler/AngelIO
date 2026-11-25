@@ -22,6 +22,7 @@ def check(executable):
         ], cwd=executable.parent, startupinfo=options)
         try:
             deadline = time.monotonic() + 90
+            last_read_error = None
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     raise RuntimeError(f"Packaged game exited early with code {process.returncode}")
@@ -31,8 +32,11 @@ def check(executable):
                             rows = db.execute("select map, data from component_state where key=?",
                                               ("angeliohost.liftlanding.v1",)).fetchall()
                         except sqlite3.OperationalError as exc:
-                            if "no such table" not in str(exc):
+                            # The live writer may still be creating the schema or committing its journal.
+                            code = exc.sqlite_errorcode & 0xff
+                            if code not in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and "no such table" not in str(exc):
                                 raise
+                            last_read_error = exc
                             continue
                     floors = sorted(struct.unpack_from("<i", data)[0] for map_name, data in rows
                                     if map_name.lower() == "/game/demo/twolifts")
@@ -40,7 +44,7 @@ def check(executable):
                         print(f"{executable.name}: packaged TwoLifts committed floors {floors}")
                         return
                 time.sleep(0.2)
-            raise TimeoutError("The packaged game did not commit both demo landings")
+            raise TimeoutError("The packaged game did not commit both demo landings") from last_read_error
         finally:
             if process.poll() is None:
                 process.terminate()

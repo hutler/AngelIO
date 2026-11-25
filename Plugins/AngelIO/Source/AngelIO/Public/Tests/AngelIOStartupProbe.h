@@ -4,7 +4,8 @@
 #include "CoreMinimal.h"
 
 class asIScriptModule;
-struct FAngelIOBenchmarkEngine;
+struct FAngelIORegisteredEngine;
+class UWorld;
 
 // Active only during synchronous registration of a benchmark component on this thread.
 struct ANGELIO_API FAngelIOStartupProbe
@@ -14,10 +15,11 @@ struct ANGELIO_API FAngelIOStartupProbe
     uint64 FileBegin = 0, CompileBegin = 0, EngineCreated = 0, CoreRegistered = 0, ProvidersInspected = 0;
     uint64 ModuleBegin = 0, ModuleEnd = 0, CompileEnd = 0, StartEnd = 0;
     bool bReuseBytecode = false;
-    bool bShareRegistrations = false;
+    bool bForcePrivateEngine = false;
     int32 Registrations = 0, Builds = 0, Loads = 0;
     TArray<uint8> Bytecode;
-    TSharedPtr<FAngelIOBenchmarkEngine> SharedEngine;
+    static TWeakPtr<FAngelIORegisteredEngine> WorldEngine(UWorld* World);
+    static int32 WorldModuleCount(UWorld* World);
 
     static void Mark(uint64 FAngelIOStartupProbe::* Field)
     {

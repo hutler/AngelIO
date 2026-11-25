@@ -46,8 +46,9 @@ namespace AngelIO
         TFunction<bool()> IsReady);
 }
 
-// Register in StartupModule before any mission is compiled. Bindings must remain
-// loaded for the lifetime of every VM that uses them.
+// Register before the first mission compiles. Each authority world keeps its registered
+// native bindings until world teardown, including periods with zero live missions.
+// Worldless validation creates an independent engine. Keep providers loaded for both lifetimes.
 class ANGELIO_API IAngelIOScriptAPI : public IModularFeature
 {
 public:
