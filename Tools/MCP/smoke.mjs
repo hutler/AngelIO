@@ -1,6 +1,6 @@
 // Usage: node smoke.mjs --project <demo.uproject> --editor <UnrealEditor-Cmd.exe>
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -23,6 +23,11 @@ const call = (name, args = {}) => client.callTool({ name, arguments: args }, und
 let fixture;
 try {
   await client.connect(transport);
+  const descriptor = JSON.parse(await readFile(new URL("../../Plugins/AngelIO/AngelIO.uplugin", import.meta.url), "utf8"));
+  const lock = JSON.parse(await readFile(new URL("./package-lock.json", import.meta.url), "utf8"));
+  assert.equal(client.getServerVersion().version, descriptor.VersionName);
+  assert.equal(lock.version, descriptor.VersionName);
+  assert.equal(lock.packages[""].version, descriptor.VersionName);
   const tools = (await client.listTools()).tools.map(tool => tool.name);
   assert.deepEqual(tools.sort(), ["describe_api", "describe_scene", "list_scripts", "read_script", "read_trace", "validate_map", "validate_script", "write_script"]);
   assert((await call("read_trace", { trace: "../DefaultEngine.ini" })).isError);

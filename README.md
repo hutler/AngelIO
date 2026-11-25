@@ -230,7 +230,7 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | Tool | Result |
 | --- | --- |
 | `list_scripts` | Paths relative to the project's `Content/AngelIO` directory |
-| `read_script` | Source text of the selected mission |
+| `read_script` | Source text of the selected mission and its SHA-256 revision for `write_script` |
 | `describe_api` | Entry point, delivery rules, and the loaded game modules' function, method, and enum declarations in `externalDeclarations` |
 | `validate_script` | Compile result, port types and directions, signal names, and compiler diagnostics with line and column |
 | `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
@@ -262,9 +262,13 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `CheckpointRestart` | Restarts a host and client on the same slot. Both peers see floor 4 and the cab at its measured fourth-floor position. The mission accepts confirmation with zero new trips or delivery calls. |
 | `MidRideRestart` | Stops the server while the host and client see the cab between floors 2 and 4. The new server starts the retry at floor 2. Both peers see one completed trip and the cab at floor 4. |
 | `LandedBeforeDeliveredRestart` | Stops with floor 4 on disk and the mission still at `Dispatched`. Both peers recover floor 4 and wait for confirmation. The new host trace contains zero `Lift.MoveTo` calls and zero `Arrived` results. |
+| `PartitionLanding` | Two players enter, leave and revisit a spatially streamed World Partition cell. Both see the saved fourth-floor landing on return. |
+| `BlinkBranches` | The client sees the lamp pulse during a ride and stop on arrival. Unloading and reloading the room gives the panel a fresh branch. |
 | `MissionInspector` | Opens the editor tab, selects a remote player's panel and a lift during a ride, checks source lines and the operation timeline, pins a result and verifies cleanup after destruction and PIE shutdown. |
 
 To exercise the MCP tools with a real stdio client, use the same `$editor` path and run the smoke test after installing the Node dependencies. After running `TypedTrips`, add `--trace <export-filename.json>` to verify the host and remote histories through the MCP transport.
+
+The release guide includes measured startup, memory and frame cost for 1–1000 waiting missions and commands to build and launch the Win64 Development and Shipping packages. [Release checks](Docs/AgentGuide.md#win64-release-and-scaling-checks)
 
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor

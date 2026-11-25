@@ -20,6 +20,8 @@
 #include "Engine/LevelStreamingDynamic.h"
 #include "EngineUtils.h"
 #include "GameFramework/WorldSettings.h"
+#include "GameFramework/Pawn.h"
+#include "WorldPartition/WorldPartition.h"
 #include "Settings/LevelEditorPlaySettings.h"
 #include "Misc/AutomationTest.h"
 
@@ -589,6 +591,89 @@ bool FAngelIOWaitActorListen::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCheckpointListen, "AngelIO.Network.ListenServer.MissionCheckpoints",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOPartitionListen, "AngelIO.Network.ListenServer.PartitionLanding",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOPartitionListen::RunTest(const FString&)
+{
+    StartListenSession(TEXT("/Game/Tests/PartitionLift"));
+    const auto Steps = ListenSteps(this);
+    struct FCell
+    {
+        TArray<TWeakObjectPtr<APawn>> Players;
+        TSharedPtr<FLiftTrip> Ride;
+        bool bReportedLoad = false;
+        void MovePlayers(double X) const
+        {
+            for (auto Player : Players)
+                if (Player.IsValid()) Player->SetActorLocation(FVector(X, 0, 180), false, nullptr, ETeleportType::TeleportPhysics);
+        }
+    };
+    auto Cell = MakeShared<FCell>();
+    Steps(TEXT("move the connected players near the distant spatial lift"), [this, Cell]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client || Host->GetNumPlayerControllers() != 2 || !Client->GetFirstPlayerController() ||
+            !Client->GetFirstPlayerController()->GetPawn()) return false;
+        for (auto It = Host->GetPlayerControllerIterator(); It; ++It)
+            if (!It->IsValid() || !It->Get()->GetPawn()) return false;
+        for (auto* World : {Host, Client})
+        {
+            auto* Partition = World->GetWorldPartition();
+            if (!TestTrue(TEXT("Spatial streaming enabled in partitioned PIE world"), Partition && Partition->IsInitialized() && Partition->IsStreamingEnabled())) return true;
+            TestNull(TEXT("Distant lift starts unloaded"), FindLift(World, 2));
+            for (auto It = World->GetPlayerControllerIterator(); It; ++It)
+                if (APawn* Pawn = It->Get()->GetPawn()) Cell->Players.Add(Pawn);
+        }
+        Cell->MovePlayers(500000);
+        return true;
+    });
+    Steps(TEXT("ride the spatially loaded lift"), [this, Cell]
+    {
+        auto* Lift = FindLift(FindPeer(NM_ListenServer), 2);
+        if (!Cell->bReportedLoad && FindPeer(NM_ListenServer)->GetTimeSeconds() > 4)
+        {
+            Cell->bReportedLoad = true;
+            for (auto* World : {FindPeer(NM_ListenServer), FindPeer(NM_Client)})
+            {
+                auto* Cab = FindLift(World, 2);
+                AddInfo(FString::Printf(TEXT("Partition %s player %s, lift %s, wait %s"), *World->GetName(),
+                    *World->GetFirstPlayerController()->GetPawn()->GetActorLocation().ToString(), *GetNameSafe(Cab),
+                    Cab ? *Cab->Mission->GetWaitingSignal() : TEXT("unloaded")));
+            }
+        }
+        if (!Lift || !Lift->IsReadyForTrip() || !AtFloor(FindPeer(NM_Client), 2, 1, 0)) return false;
+        Cell->Ride = Lift->MoveTo(4, 800);
+        return true;
+    });
+    Steps(TEXT("unload the cell after the client sees the committed arrival"), [Cell]
+    {
+        if (!Cell->Ride->IsComplete() || !AtFloor(FindPeer(NM_Client), 2, 4, 1)) return false;
+        Cell->MovePlayers(0);
+        return true;
+    });
+    Steps(TEXT("wait for cell eviction on both peers"), [this, Cell]
+    {
+        if (FindLift(FindPeer(NM_ListenServer), 2) || FindLift(FindPeer(NM_Client), 2)) return false;
+        TestNull(TEXT("Registry releases the evicted cell endpoint"), FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTargetRegistry>()
+            ->FindUniqueActor(TEXT("FreightLift"), AAngelIOExampleLift::StaticClass()));
+        Cell->MovePlayers(500000);
+        return true;
+    });
+    Steps(TEXT("cell reload restores floor and position on both peers"), []
+    {
+        for (auto* World : {FindPeer(NM_ListenServer), FindPeer(NM_Client)})
+        {
+            if (!AtFloor(World, 2, 4, 0)) return false;
+            if (!FMath::IsNearlyEqual(FindLift(World, 2)->GetActorLocation().Z, 700.0, 1.0)) return false;
+        }
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBranchListen, "AngelIO.Network.ListenServer.BlinkBranches",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -930,6 +1015,7 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
         FGuid CheckpointId;
         FVector FloorFourLocation;
+        TWeakObjectPtr<ULevelStreamingDynamic> LateRoom;
         TStrongObjectPtr<UAngelIOTestSignalObserver> Motion{NewObject<UAngelIOTestSignalObserver>()};
         TStrongObjectPtr<UAngelIOTestSignalObserver> ClientMotion{NewObject<UAngelIOTestSignalObserver>()};
     };
@@ -1176,7 +1262,22 @@ bool FAngelIOCheckpointRestart::RunTest(const FString& InitialStage)
                 TestEqual(TEXT("No repeat client arrival presentation"), Session->ClientMotion->Presentations, 0);
                 AddInfo(FString::Printf(TEXT("Recovered Dispatched -> Delivered, waiting for Confirm; client floor 4 at %s, zero trips and zero arrivals"),
                     *FindLift(FindPeer(NM_Client), 2)->GetActorLocation().ToString()));
+                GEditor->RequestLateJoin();
                 return true;
+            });
+            Steps(TEXT("late client loads the recovered room"), [Session]
+            {
+                auto* Late = FindPeer(NM_Client, Session->Client->GetWorld());
+                if (!Late || !Late->GetFirstPlayerController() || !Late->GetFirstPlayerController()->GetNetConnection()) return false;
+                Session->LateRoom = LoadLiftRoom(Late);
+                return Session->LateRoom.IsValid();
+            });
+            Steps(TEXT("late client sees the recovered cab and pending confirmation"), [Session]
+            {
+                auto* Panel = DeliveryPanel(Session->LateRoom.Get());
+                if (!Panel || Panel->GetWaitingSignal() != TEXT("Confirm") || !TripOutput(Panel, TEXT("Stage"), 1)) return false;
+                auto* Late = Panel->GetWorld();
+                return AtFloor(Late, 2, 4, 0) && FindLift(Late, 2)->GetActorLocation().Equals(Session->FloorFourLocation, 1.0);
             });
         }
         else

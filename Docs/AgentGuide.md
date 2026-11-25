@@ -191,7 +191,8 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
 | `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart` using networked PIE |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart`, `BlinkBranches` and `PartitionLanding` using networked PIE |
+| `AngelIO.Performance.WaitingMissions` | Startup, process resident-memory growth and baseline/loaded frame time for 1, 100 and 1000 independently ticking mission components |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 To verify a process restart, run the automation command above twice with the filter `AngelIO.Network.ListenServer.CheckpointRestart`. Generate a fresh GUID with `[guid]::NewGuid()`. Add `-AngelIORestartTestWrite=<guid>` to the first editor invocation and `-AngelIORestartTestRead=<guid>` to the second. The first host delivers to floor 4 and exits. The second host restores `Delivered` and accepts confirmation. The test checks floor 4, the physical cab position and zero new trips on both peers, and zero delivery calls in the new host's trace. Successful completion removes the isolated test slot.
@@ -212,6 +213,36 @@ if ($LASTEXITCODE -ne 0) { throw 'MCP dependency install failed' }
 node Tools/MCP/smoke.mjs --project $project --editor $editor
 if ($LASTEXITCODE -ne 0) { throw 'MCP smoke test failed' }
 ```
+
+### Win64 release and scaling checks
+
+`AngelIO.Performance.WaitingMissions` starts independent actors, each with a component, compiled VM and pending game-time wait. It measures synchronous spawn and start, change in process resident memory, and mean game-thread frame time across 120 fixed-delta test-world ticks. The baseline uses the same world before spawning. One Development Editor run on Windows x64 with NullRHI and 12 physical cores produced these values.
+
+| Waiting missions | Total startup (ms) | Resident growth (MiB) | Empty frame (ms) | Waiting frame (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.66 | 0.00 | 0.066 | 0.063 |
+| 100 | 48.41 | 7.65 | 0.066 | 0.066 |
+| 1000 | 484.10 | 87.39 | 0.073 | 0.395 |
+
+These figures include actor creation and editor tracing. The memory delta reflects process allocation and reuse. With 1000 waiting missions the additional tick cost was about 0.32 ms. Keep the current tick model for this workload. For levels that activate hundreds of missions in one frame, profile compiler time separately from actor spawning before introducing a bytecode cache.
+
+`AngelIO.Network.ListenServer.PartitionLanding` uses the small partitioned map `/Game/Tests/PartitionLift`. The host and client move close enough to load the freight lift, ride to floor 4, leave its cell, and return. The test checks removal from the registry, restored physical height and zero new trips. The read half of `LandedBeforeDeliveredRestart` also connects a late client after the new server is already waiting for confirmation.
+
+To reproduce the packaged checks, set `$engine` to the Unreal installation directory and run from the checkout. The staged games use cooked maps and IoStore. `-SkipZenStore` selects local cooked output for this run.
+
+```powershell
+$project = (Resolve-Path AngelIO.uproject).Path
+foreach ($config in 'Development', 'Shipping') {
+    $stage = Join-Path $PWD "Saved/AngelIO/Packages/0.6.1/$config"
+    & "$engine/Engine/Build/BatchFiles/RunUAT.bat" BuildCookRun "-project=$project" -target=AngelIOHost -platform=Win64 "-clientconfig=$config" -build -cook -stage -pak -iostore -package '-map=/Game/Demo/TwoLifts+/Game/Tests/PartitionLift' "-stagingdirectory=$stage" -AdditionalCookerOptions=-SkipZenStore -ddc=InstalledNoZenLocalFallback -nop4 -unattended
+    if ($LASTEXITCODE) { throw "Packaging failed for $config" }
+    $game = if ($config -eq 'Shipping') { 'AngelIOHost-Win64-Shipping.exe' } else { 'AngelIOHost.exe' }
+    & "$engine/Engine/Binaries/ThirdParty/Python3/Win64/python.exe" Tools/TestPackagedLandings.py "$stage/Windows/AngelIO/Binaries/Win64/$game"
+    if ($LASTEXITCODE) { throw "Packaged landing check failed for $config" }
+}
+```
+
+The probe starts each packaged executable with a temporary user directory and opens its SQLite slot read-only. It exits successfully once both lifts commit their expected floors, 2 and 3.
 
 ### Diagnose a failed check
 
