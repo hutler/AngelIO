@@ -4,6 +4,7 @@
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "Engine/World.h"
+#include "Engine/Level.h"
 #include "Features/IModularFeatures.h"
 #include <string>
 
@@ -59,11 +60,26 @@ namespace
         return UTF8_TO_TCHAR(Name.c_str());
     }
 
-    AAngelIOExampleLift* ResolveLift(UWorld* World, const FString& Name, bool bRequireReady)
+    struct FLiftLookup
     {
-        if (!World || Name.IsEmpty()) return nullptr;
+        FString Name;
+        TWeakObjectPtr<ULevel> Room;
+        bool bLocal = false;
+    };
+
+    FLiftLookup LiftLookup(const FString& Name)
+    {
+        if (auto* Mission = AngelIO::GetScriptMission())
+            if (const FName* Bound = Mission->RoomTargets.Find(FName(*Name, FNAME_Find)))
+                return {Bound->ToString(), Mission->GetOwner()->GetLevel(), true};
+        return {Name, nullptr, false};
+    }
+
+    AAngelIOExampleLift* ResolveLift(UWorld* World, const FLiftLookup& Lookup, bool bRequireReady)
+    {
+        if (!World || Lookup.Name.IsEmpty() || (Lookup.bLocal && !Lookup.Room.IsValid())) return nullptr;
         auto* Registry = World->GetSubsystem<UAngelIOTargetRegistry>();
-        auto* Lift = Cast<AAngelIOExampleLift>(Registry->FindUniqueActor(FName(*Name, FNAME_Find), AAngelIOExampleLift::StaticClass()));
+        auto* Lift = Cast<AAngelIOExampleLift>(Registry->FindUniqueActor(FName(*Lookup.Name, FNAME_Find), AAngelIOExampleLift::StaticClass(), Lookup.Room.Get()));
         if (Lift && bRequireReady && !Lift->IsReadyForTrip())
             return nullptr;
         return Lift;
@@ -72,8 +88,9 @@ namespace
     void ReturnLift(asIScriptGeneric* Call, bool bRequireReady)
     {
         const FString Name = ReadName(Call);
-        auto* Lift = ResolveLift(AngelIO::GetScriptWorld(), Name, bRequireReady);
-        Call->SetReturnAddress(Lift ? new FLiftHandle({Lift, FName(*Name), Lift->GetPlayGeneration()}) : nullptr);
+        const auto Lookup = LiftLookup(Name);
+        auto* Lift = ResolveLift(AngelIO::GetScriptWorld(), Lookup, bRequireReady);
+        Call->SetReturnAddress(Lift ? new FLiftHandle({Lift, FName(*Lookup.Name), Lift->GetPlayGeneration()}) : nullptr);
     }
     void FindNamedLift(asIScriptGeneric* Call) { ReturnLift(Call, false); }
     void FindReadyLift(asIScriptGeneric* Call) { ReturnLift(Call, true); }
@@ -89,8 +106,9 @@ namespace
         TOptional<double> Timeout;
         if (Call->GetArgCount() == 2) Timeout = Call->GetArgFloat(1);
         TWeakObjectPtr<UWorld> World = AngelIO::GetScriptWorld();
-        AngelIO::AwaitCondition(TEXT("WaitActor"), Name, Timeout,
-            [World, Name] { return ResolveLift(World.Get(), Name, true) != nullptr; });
+        const auto Lookup = LiftLookup(Name);
+        AngelIO::AwaitCondition(TEXT("WaitActor"), Lookup.Name, Timeout,
+            [World, Lookup] { return ResolveLift(World.Get(), Lookup, true) != nullptr; });
     }
 
     AAngelIOExampleLift* GetCurrentLift(const FNamedLift& Handle)
@@ -163,6 +181,7 @@ public:
     void GetMapLookups(TArray<FAngelIOMapLookup>& Out) const override
     {
         Out.Add({TEXT("FindLift"), AAngelIOExampleLift::StaticClass(), true});
+        Out.Add({TEXT("WaitActor"), AAngelIOExampleLift::StaticClass(), true});
     }
 #endif
 

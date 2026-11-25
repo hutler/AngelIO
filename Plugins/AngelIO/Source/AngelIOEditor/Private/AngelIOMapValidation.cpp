@@ -104,10 +104,15 @@ FAngelIOMapReport AngelIO::ValidateMap(UWorld& World)
         for (const auto& Target : Program->LiteralTargets())
         {
             TArray<FString> Matches;
+            const FName Alias(*Target.Name, FNAME_Find);
+            const FName* Bound = Mission->RoomTargets.Find(Alias);
             if (Target.Name.Len() < NAME_SIZE)
-                if (const auto* Actors = Targets.Find(FName(*Target.Name, FNAME_Find)))
+                if (const auto* Actors = Targets.Find(Bound ? *Bound : Alias))
                     for (const auto* Actor : *Actors)
-                        if (!Target.OwnerClass || Actor->IsA(Target.OwnerClass)) Matches.Add(Actor->GetPathName());
+                        if ((!Bound || (Mission->GetOwner() && Actor->GetLevel() == Mission->GetOwner()->GetLevel())) &&
+                            (!Target.OwnerClass || Actor->IsA(Target.OwnerClass))) Matches.Add(Actor->GetPathName());
+            // A global WaitActor can intentionally name an unloaded room.
+            if (!Bound && Target.Function == TEXT("WaitActor") && Matches.IsEmpty()) continue;
             if (Matches.IsEmpty())
                 Error(TEXT("target_missing"), Target.Name, FString::Printf(TEXT("%s('%s') has no matching placed actor."),
                     *Target.Function, *Target.Name), Target.Line);

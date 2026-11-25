@@ -632,6 +632,7 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
                 if (!Panel) return false;
                 Panel->Script = TEXT("Examples/RoomDelivery.as");
                 Panel->bStartOnBeginPlay = true;
+                Panel->RoomTargets.Add(TEXT("FreightLift"), Room->CompletedRoom.IsValid() ? TEXT("ServiceLiftB") : TEXT("FreightLift"));
             }
             Room->Host->SetShouldBeVisible(true);
             Room->Client->SetShouldBeVisible(true);
@@ -775,6 +776,21 @@ bool FAngelIOCheckpointListen::RunTest(const FString&)
         if (TestTrue(TEXT("Export mixed checkpoint and operation history"),
             FindPeer(NM_ListenServer)->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Path)))
             AddInfo(TEXT("Checkpoint trace: ") + Path);
+        TestTrue(TEXT("Dispatch the independently bound second room"), DeliveryPanel(Room->Host.Get())->SendSignal(TEXT("Dispatch"), 0));
+        return true;
+    });
+    Steps(TEXT("only the second room's chosen service lift makes the new delivery"), [this, Room]
+    {
+        const auto* Client = DeliveryPanel(Room->Client.Get());
+        if (!Client || Client->GetWaitingSignal() != TEXT("Confirm")) return false;
+        for (auto* Stream : {Room->Host.Get(), Room->Client.Get()})
+        {
+            auto* Service = CastChecked<AAngelIOExampleLift>(DeliveryPanel(Stream)->GetOwner());
+            auto* Freight = CastChecked<AAngelIOExampleLift>(DeliveryPanel(Stream, 2)->GetOwner());
+            if (!TripOutput(Service->Mission, TEXT("LastFloor"), 4) || !TripOutput(Freight->Mission, TEXT("LastFloor"), 2)) return false;
+        }
+        auto* OriginalService = CastChecked<AAngelIOExampleLift>(DeliveryPanel(Room->CompletedRoom.Get())->GetOwner());
+        TestTrue(TEXT("Same named lift in the first room stayed at floor three"), TripOutput(OriginalService->Mission, TEXT("LastFloor"), 3));
         return true;
     });
     EndListenSession();

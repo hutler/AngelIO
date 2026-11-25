@@ -90,6 +90,7 @@ int32 UAngelIOCheckCommandlet::Main(const FString& Params)
     {
         auto Json = MakeShared<FJsonObject>();
         Json->SetStringField(TEXT("name"), P.Name);
+        Json->SetStringField(TEXT("defaultExpression"), P.DefaultExpression);
         Json->SetStringField(TEXT("direction"), P.bInput ? TEXT("in") : TEXT("out"));
         Json->SetStringField(TEXT("type"), P.Type == EAngelIOType::Integer ? TEXT("int") :
             P.Type == EAngelIOType::Float ? TEXT("float") : TEXT("bool"));

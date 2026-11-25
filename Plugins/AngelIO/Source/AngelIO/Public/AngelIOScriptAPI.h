@@ -5,6 +5,7 @@
 
 class asIScriptEngine;
 class UWorld;
+class UAngelIOScriptComponent;
 class FAngelIOOperation;
 class FJsonObject;
 class UAngelIOTraceSubsystem;
@@ -30,6 +31,7 @@ struct FAngelIOScriptWrapper
 namespace AngelIO
 {
     ANGELIO_API UWorld* GetScriptWorld();
+    ANGELIO_API UAngelIOScriptComponent* GetScriptMission();
     // Identity of the last saved or matching loaded checkpoint (writer, version and stage).
     // Invalid outside a mission or after a checkpoint lookup misses.
     ANGELIO_API FGuid GetCheckpointStepId();

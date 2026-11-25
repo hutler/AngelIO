@@ -22,6 +22,10 @@ bool FAngelIOMapContract::RunTest(const FString&)
     A->Address->SetTargetName(TEXT("FreightLift"));
     B->Address->SetTargetName(TEXT("ServiceLiftB"));
     const auto Healthy = AngelIO::ValidateMap(*World);
+    FAngelIOProgram Contract;
+    TestTrue(TEXT("Read port defaults without running the mission"), Contract.CompileFile(TEXT("Elevator.as")) &&
+        Contract.Ports().ContainsByPredicate([](const auto& P){ return P.Name == TEXT("TravelSpeed") && P.DefaultExpression == TEXT("240.0f"); }));
+    TestTrue(TEXT("Mission file selector includes nested scripts"), A->Mission->GetMissionScripts().Contains(TEXT("Examples/RoomDelivery.as")));
     TestEqual(TEXT("Two placed lifts and two controller panels"), Healthy.MissionsChecked, 4);
     TestTrue(TEXT("Group can contain both lifts"), Healthy.Diagnostics.IsEmpty());
 

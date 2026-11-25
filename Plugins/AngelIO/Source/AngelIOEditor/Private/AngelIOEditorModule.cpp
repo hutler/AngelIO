@@ -2,6 +2,8 @@
 #include "SAngelIOMissionInspector.h"
 #include "AngelIOMapValidation.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIOMissionDetails.h"
+#include "PropertyEditorModule.h"
 #include "Editor.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
@@ -18,6 +20,9 @@ public:
     void StartupModule() override
     {
         if (IsRunningCommandlet()) return;
+        FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor").RegisterCustomClassLayout(
+            UAngelIOScriptComponent::StaticClass()->GetFName(),
+            FOnGetDetailCustomizationInstance::CreateLambda([] { return MakeShared<FAngelIOMissionDetails>(); }));
         UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAngelIOEditorModule::RegisterMenus));
         FGlobalTabmanager::Get()->RegisterNomadTabSpawner(SAngelIOMissionInspector::TabId,
             FOnSpawnTab::CreateLambda([](const FSpawnTabArgs&)
@@ -30,6 +35,8 @@ public:
     }
     void ShutdownModule() override
     {
+        if (auto* Properties = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor"))
+            Properties->UnregisterCustomClassLayout(UAngelIOScriptComponent::StaticClass()->GetFName());
         if (FSlateApplication::IsInitialized() && !IsRunningCommandlet())
         {
             UToolMenus::UnRegisterStartupCallback(this);

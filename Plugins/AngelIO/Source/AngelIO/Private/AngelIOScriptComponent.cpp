@@ -6,6 +6,8 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Net/UnrealNetwork.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAngelIO, Log, All);
 
@@ -14,6 +16,16 @@ UAngelIOScriptComponent::UAngelIOScriptComponent()
     SetIsReplicatedByDefault(true);
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = false;
+}
+
+TArray<FString> UAngelIOScriptComponent::GetMissionScripts() const
+{
+    TArray<FString> Files;
+    const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("AngelIO")) + TEXT("/");
+    IFileManager::Get().FindFilesRecursive(Files, *Root, TEXT("*.as"), true, false);
+    for (FString& File : Files) FPaths::MakePathRelativeTo(File, *Root);
+    Files.Sort();
+    return Files;
 }
 
 void UAngelIOScriptComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -240,7 +252,10 @@ void UAngelIOScriptComponent::DispatchPendingEvents()
         if (!Event.Target.IsNone())
         {
             if (auto* Registry = GetWorld()->GetSubsystem<UAngelIOTargetRegistry>())
-                Registry->SendTo(Event.Target, Event.Name, Event.Value);
+            {
+                const FName* Bound = RoomTargets.Find(Event.Target);
+                Registry->SendToInLevel(Bound ? *Bound : Event.Target, Event.Name, Event.Value, Bound ? GetOwner()->GetLevel() : nullptr);
+            }
             continue;
         }
         if (PresentationSignals.ContainsByPredicate([&](const FString& Name)

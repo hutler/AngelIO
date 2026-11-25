@@ -14,11 +14,12 @@ public:
     UFUNCTION(BlueprintPure, Category="AngelIO")
     TArray<UAngelIOScriptComponent*> FindTargets(FName TargetName) const;
     // Multiple matching endpoints on the same owner still identify one actor.
-    AActor* FindUniqueActor(FName TargetName, UClass* ActorClass) const;
+    AActor* FindUniqueActor(FName TargetName, UClass* ActorClass, const ULevel* Level = nullptr) const;
 
     // Returns the number of live recipients selected at send time.
     UFUNCTION(BlueprintCallable, Category="AngelIO")
     int32 SendTo(FName TargetName, const FString& InputSignal, int32 Value);
+    int32 SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level);
 
 private:
     friend class UAngelIOScriptComponent;

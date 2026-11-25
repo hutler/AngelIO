@@ -40,8 +40,15 @@ public:
     FName GetTargetName() const { return TargetName; }
 
     // Relative to the project's Content/AngelIO, for example Elevator.as.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO", meta=(GetOptions="GetMissionScripts"))
     FString Script;
+
+    UFUNCTION()
+    TArray<FString> GetMissionScripts() const;
+
+    // A mapped name resolves only to endpoints placed in this component's level instance.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO")
+    TMap<FName, FName> RoomTargets;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO")
     bool bStartOnBeginPlay = true;

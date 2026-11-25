@@ -12,7 +12,7 @@ TArray<UAngelIOScriptComponent*> UAngelIOTargetRegistry::FindTargets(FName Targe
     return Targets;
 }
 
-AActor* UAngelIOTargetRegistry::FindUniqueActor(FName TargetName, UClass* ActorClass) const
+AActor* UAngelIOTargetRegistry::FindUniqueActor(FName TargetName, UClass* ActorClass, const ULevel* Level) const
 {
     AActor* Match = nullptr;
     if (const auto* Members = Groups.Find(TargetName))
@@ -21,7 +21,7 @@ AActor* UAngelIOTargetRegistry::FindUniqueActor(FName TargetName, UClass* ActorC
         {
             const auto* Endpoint = Member.Get();
             auto* Owner = Endpoint ? Endpoint->GetOwner() : nullptr;
-            if (!IsValid(Owner) || (ActorClass && !Owner->IsA(ActorClass))) continue;
+            if (!IsValid(Owner) || (ActorClass && !Owner->IsA(ActorClass)) || (Level && Owner->GetLevel() != Level)) continue;
             if (Match && Match != Owner) return nullptr;
             Match = Owner;
         }
@@ -45,13 +45,20 @@ void UAngelIOTargetRegistry::Unregister(FName Name, UAngelIOScriptComponent* Tar
 
 int32 UAngelIOTargetRegistry::SendTo(FName TargetName, const FString& InputSignal, int32 Value)
 {
+    return SendToInLevel(TargetName, InputSignal, Value, nullptr);
+}
+
+int32 UAngelIOTargetRegistry::SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level)
+{
     if (GetWorld()->GetNetMode() == NM_Client || InputSignal.IsEmpty()) return 0;
     auto* Members = Groups.Find(TargetName);
     if (!Members) return 0;
     Members->RemoveAllSwap([](const auto& P) { return !P.IsValid(); });
-    const int32 Count = Members->Num();
+    FDelivery Next{*Members, InputSignal, Value};
+    if (Level) Next.Recipients.RemoveAll([Level](const auto& P) { return P->GetOwner()->GetLevel() != Level; });
+    const int32 Count = Next.Recipients.Num();
     if (Count == 0) return 0;
-    Queue.Add({*Members, InputSignal, Value});
+    Queue.Add(MoveTemp(Next));
     if (!bDelivering)
     {
         TGuardValue<bool> Guard(bDelivering, true);

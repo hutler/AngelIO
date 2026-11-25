@@ -1,6 +1,7 @@
 #include "AngelIOProgram.h"
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOScriptAPI.h"
+#include "AngelIOScriptComponent.h"
 #include "AngelIOTraceSubsystem.h"
 #include "Components/ActorComponent.h"
 #include "Dom/JsonObject.h"
@@ -162,6 +163,13 @@ FGuid AngelIO::GetCheckpointStepId()
     return Scope ? Scope->CheckpointStepId : FGuid();
 }
 
+UAngelIOScriptComponent* AngelIO::GetScriptMission()
+{
+    auto* Context = asGetActiveContext();
+    auto* Scope = Context ? static_cast<FExecutionScope*>(Context->GetUserData(ExecutionKey)) : nullptr;
+    return Scope ? Cast<UAngelIOScriptComponent>(Scope->Component.Get()) : nullptr;
+}
+
 void AngelIO::AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FString& Label)
 {
     AwaitOperation(Operation, Label, {});
@@ -224,6 +232,56 @@ struct FAngelIOProgram::FImpl
     FString RestoredStage;
     TArray<FAngelIOLiteralTarget> LiteralTargets;
 
+    // Display the initializer without executing game-module code in the editor.
+    void ReadPortDefaults(std::string_view Source)
+    {
+        FAngelIOPort* Port = nullptr;
+        const char* Start = nullptr;
+        std::string_view Previous;
+        int32 Braces = 0, Parens = 0;
+        for (auto& P : PublicPorts)
+            P.DefaultExpression = P.Type == EAngelIOType::Boolean ? TEXT("false") : TEXT("0");
+        while (!Source.empty())
+        {
+            asUINT Size = 0;
+            const auto Kind = Engine->ParseToken(Source.data(), Source.size(), &Size);
+            if (!Size) break;
+            const auto Token = Source.substr(0, Size);
+            Source.remove_prefix(Size);
+            if (Kind == asTC_COMMENT || Kind == asTC_WHITESPACE) continue;
+            if (!Braces && !Parens)
+            {
+                if (Port && (Token == ";" || Token == ","))
+                {
+                    if (Start)
+                    {
+                        FUTF8ToTCHAR Text(Start, int32(Token.data() - Start));
+                        Port->DefaultExpression = FString(Text.Length(), Text.Get()).TrimStartAndEnd();
+                    }
+                    Port = nullptr;
+                    Start = nullptr;
+                }
+                else if (Port && Token == "=" && !Start) Start = Source.data();
+                else if (!Port && (Previous == "int" || Previous == "bool" || Previous == "float" || Previous == ","))
+                {
+                    const bool Input = Token.starts_with("in_");
+                    if (Input || Token.starts_with("out_"))
+                    {
+                        const auto Name = Token.substr(Input ? 3 : 4);
+                        FUTF8ToTCHAR Text(Name.data(), int32(Name.size()));
+                        const FString Field(Text.Length(), Text.Get());
+                        Port = PublicPorts.FindByPredicate([&](const auto& P){ return P.bInput == Input && P.Name == Field; });
+                    }
+                }
+            }
+            if (Token == "{") ++Braces;
+            if (Token == "}") --Braces;
+            if (Token == "(") ++Parens;
+            if (Token == ")") --Parens;
+            Previous = Token;
+        }
+    }
+
     // The SDK lexer excludes comments and quoted source text from call matching.
     // Only direct literal arguments are knowable before running a mission.
     void ReadMapTargets(std::string_view Source, TArray<FAngelIOMapLookup>& MapLookups)
@@ -236,7 +294,13 @@ struct FAngelIOProgram::FImpl
             MapLookups.RemoveAll([&](const FAngelIOMapLookup& Rule)
                 { return Rule.Function.Equals(Name, ESearchCase::CaseSensitive); });
         };
-        for (asUINT I = 0; I < Module->GetFunctionCount(); ++I) ExcludeShadow(Module->GetFunctionByIndex(I));
+        for (asUINT I = 0; I < Module->GetFunctionCount(); ++I)
+        {
+            const auto* Fn = Module->GetFunctionByIndex(I);
+            const char* Section = nullptr;
+            Fn->GetDeclaredAt(&Section, nullptr, nullptr);
+            if (!Section || FCStringAnsi::Strcmp(Section, "AngelIO API") != 0) ExcludeShadow(Fn);
+        }
         for (asUINT I = 0; I < Module->GetObjectTypeCount(); ++I)
         {
             const auto* Type = Module->GetObjectTypeByIndex(I);
@@ -680,6 +744,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     S.Status = EAngelIOState::Compiled;
 #if WITH_EDITOR
     S.ReadMapTargets({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())}, MapLookups);
+    S.ReadPortDefaults({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
 #endif
     return true;
 }

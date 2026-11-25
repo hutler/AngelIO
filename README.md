@@ -28,6 +28,8 @@ To change the initial ride, select a placed `AngelIOExampleLift` and edit **Requ
 
 ## Call a typed API and wait for a trip
 
+Select a placed script component and choose a mission from the **Script** dropdown. **Mission Contract** shows each compiled input and output, its type and its source initializer. Enter an input override or clear it to use the script default. For a literal target, choose a named endpoint in the room to bind that role to the current level instance. The same panel can then drive different lifts in two copies of a room. **Tools → Validate AngelIO Missions** checks missing and ambiguous bindings before PIE.
+
 The demo game module exposes `Lift`, `LiftTrip`, and `TripResult` to AngelScript. This mission records the floor only after its own ride arrives.
 
 ```angelscript

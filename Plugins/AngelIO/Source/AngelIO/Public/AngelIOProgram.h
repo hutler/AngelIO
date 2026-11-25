@@ -41,6 +41,9 @@ struct FAngelIOPort
     EAngelIOType Type;
     bool bInput;
     int32 Index;
+#if WITH_EDITOR
+    FString DefaultExpression;
+#endif
 };
 
 struct FAngelIOEvent
