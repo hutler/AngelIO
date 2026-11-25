@@ -204,6 +204,8 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Performance.MissionStartup` | Paired startup measurements for 1000 instances of the same script, with per-phase timings and a bytecode reuse experiment |
 | `AngelIO.Performance.SharedRegistration` | Paired source builds with one registered engine per mission or per batch of 1000 missions |
 | `AngelIO.Performance.WorldBytecode` | Six alternating pairs of 1000 component starts on fresh world engines, compiling from source or reusing debug bytecode |
+| `AngelIO.Network.ListenServer.StreamedBytecode` | Cold and repeat loads of a mixed-script room with a source control and two bounded cache sizes |
+| `AngelIO.Missions.BytecodeCacheRevisions` | Source and wrapper edits rebuild the cached label and a failed edit preserves its last usable revision |
 | `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |
 | `AngelIO.Missions.WorldBytecodeIsolation` | Independent globals, signal delivery and source lines across 1000 instances of one cached script |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
@@ -308,9 +310,33 @@ Version 0.7.1 adds an editor benchmark for levels that start many copies of the 
 
 The measurements used Unreal Engine 5.8.4 Win64 Development Editor with NullRHI on a Ryzen 9 7845HX. For the tag baseline, run `AngelIO.Performance.SharedRegistration` on `v0.7.0` and select `mode=shared_api`. In the paired experiment the source control built 1000 modules. The bytecode path built the first module, saved 471 bytes including debug information and loaded them into 999 separate modules. Both paths still read the file and initialize each component, module and execution context. The mean paired saving was **57.3 ms (23.1%)**, ranging from **52.4 to 69.7 ms** across pairs. Building or loading modules accounted for 50.6 ms of that saving. [Per-run timings and phase breakdown (CSV)](https://github.com/hutler/AngelIO/releases/download/v0.7.1/world-bytecode-startup.csv)
 
-The cache runs only inside editor automation. It retains one entry per probe and matches the world, source label, exact source text and generated wrappers. The measurement supports a world-local memory cache for repeated scripts. Levels with a varied script mix need a representative hit-rate and memory measurement before choosing its capacity.
+The v0.7.1 experiment retained one entry per probe and matched the world, source label, exact source text and generated wrappers. The bytecode experiments run inside editor automation.
 
 `AngelIO.Missions.WorldBytecodeIsolation` checks the individual starting floors, trip counters, signals and wait lines (18 or 25) of 1000 `Elevator.as` instances and resumes the last instance after releasing its siblings. `AngelIO.Network.ListenServer.SharedRegistrationInspector` compiles `TypedLift.as` once, releases that module and starts both player panels from its bytecode. The PIE inspector follows the client's ride at line 22 while the host panel waits at line 11. After the host panel stops, the client receives floor 4 and the surviving panel returns to line 11.
+
+#### Bytecode cache across room reloads
+
+Run the automation command with `$filter = 'AngelIO.Network.ListenServer.StreamedBytecode'`. Each capacity gets a fresh listen-server PIE session with a connected client. The host starts capturing after the player panels have initialized, with an empty room cache. The test streams `/Game/Demo/TwoLifts` into `/Engine/Maps/Entry`. Its two lifts run `Elevator.as`. Before showing the room, the test assigns `Examples/BlinkPanel.as` and `Examples/RoomDelivery.as` to their panel components. Both peers fully unload the level and load the same configuration again. Each visit starts four new mission modules through normal component `BeginPlay`.
+
+| Host cache capacity | First visit, hits / starts | Return visit, hits / starts | Debug bytecode (bytes) | Retained cache heap (bytes) |
+| --- | ---: | ---: | ---: | ---: |
+| Source control | 0 / 4 | 0 / 4 | 0 | 0 |
+| 1 entry | 0 / 4 | 0 / 4 | 1,423 | 4,687 |
+| 3 entries | 1 / 4 (25%) | 4 / 4 (100%) | 3,975 | 11,991 |
+
+Hit counts and memory were identical in five independent Win64 Development Editor processes (UE 5.8.4, NullRHI, Ryzen 9 7845HX). The following timings are medians in milliseconds. Component time sums the four synchronous host `StartScript` calls. Visibility time starts at the load request and ends on the automation tick that observes the level visible on both peers. It includes streaming, test setup on the hidden level and frame scheduling. A cold cache here means empty bytecode storage after the client has joined. The editor and filesystem can already have the map and source files in memory.
+
+| Capacity | Component time, first | Component time, return | Request to visible, first | Request to visible, return |
+| --- | ---: | ---: | ---: | ---: |
+| Source control | 1.880 | 1.947 | 35.085 | 55.993 |
+| 1 entry | 2.073 | 2.082 | 34.709 | 59.132 |
+| 3 entries | 2.060 | 1.213 | 35.699 | 57.909 |
+
+On return, the three-entry cache saved 0.734 ms of mission startup relative to the source control. The room reached visibility in about 56–58 ms in those two configurations. For this room the full working set fits in 11.71 KiB and the observed benefit is local to mission startup. [Five runs, all capacities and both visits (CSV)](https://github.com/hutler/AngelIO/releases/download/v0.7.2/streamed-room-bytecode.csv)
+
+Each hit loads saved bytecode into a new module. Each miss builds the source. The control builds every script directly. At capacity one, alternating scripts evicted the resident entry three times on first load and four times on return. Three entries held the whole working set. The authority world kept exactly the same cache allocations while the room was unloaded and released the cache at PIE shutdown. The client received both lift floors and both panel waits on each visit and had no script engine or cache.
+
+`heap_bytes` sums the Unreal containers' allocated sizes for entry slots, bytecode buffers, source labels, full source text and generated wrappers, including reserved capacity. The figure covers retained dynamic storage. It excludes the fixed-size probe, allocator bookkeeping, temporary compilation memory and each live VM. Entries use FIFO eviction. A successful edit replaces the old revision of its label. The separate `BytecodeCacheRevisions` test changes both source and wrapper bodies, checks the executed results and verifies recovery from an invalid edit.
 
 #### Packaged landing checks
 

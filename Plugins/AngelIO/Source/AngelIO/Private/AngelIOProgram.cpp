@@ -268,10 +268,27 @@ void UAngelIOScriptWorldSubsystem::Deinitialize()
     bClosing = true;
     while (!Programs.IsEmpty()) (*Programs.CreateConstIterator())->EndWorld();
     RegisteredEngine.Reset();
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    StartupProbe.Reset();
+#endif
     Super::Deinitialize();
 }
 
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+TWeakPtr<FAngelIOStartupProbe> FAngelIOStartupProbe::EnableWorldCapture(UWorld* World, int32 Capacity)
+{
+    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
+    if (!Owner || Owner->bClosing || World->GetNetMode() == NM_Client || Capacity < 0 || Owner->StartupProbe) return {};
+    Owner->StartupProbe = MakeShared<FAngelIOStartupProbe>(Capacity);
+    return Owner->StartupProbe;
+}
+
+TSharedPtr<FAngelIOStartupProbe> FAngelIOStartupProbe::WorldCapture(UWorld* World)
+{
+    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
+    return Owner ? Owner->StartupProbe : nullptr;
+}
+
 TWeakPtr<FAngelIORegisteredEngine> FAngelIOStartupProbe::WorldEngine(UWorld* World)
 {
     auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;

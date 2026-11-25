@@ -83,8 +83,8 @@ static bool CompareStartup(FAutomationTestBase& Test, EStartupMode Baseline, ESt
         if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
         UWorld* World = Scene.GetTestWorld();
         World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
-        FAngelIOStartupProbe Probe;
-        Probe.bReuseBytecode = Mode == EStartupMode::PrivateBytecode || Mode == EStartupMode::WorldBytecode;
+        const bool bReuseBytecode = Mode == EStartupMode::PrivateBytecode || Mode == EStartupMode::WorldBytecode;
+        FAngelIOStartupProbe Probe(bReuseBytecode ? 1 : 0);
         Probe.bForcePrivateEngine = Mode == EStartupMode::PrivateSource || Mode == EStartupMode::PrivateBytecode;
         TArray<UAngelIOScriptComponent*> Missions;
         Missions.Reserve(Count);
@@ -142,8 +142,8 @@ static bool CompareStartup(FAutomationTestBase& Test, EStartupMode Baseline, ESt
             !Test.TestEqual(TEXT("First TimedGate wait line"), First.Line, 6) ||
             !Test.TestEqual(TEXT("Last TimedGate wait line"), Last.Line, 6) ||
             !Test.TestEqual(TEXT("API registrations"), Probe.Registrations, Probe.bForcePrivateEngine ? Count : 1) ||
-            !Test.TestEqual(TEXT("Source builds"), Probe.Builds, Probe.bReuseBytecode ? 1 : Count) ||
-            !Test.TestEqual(TEXT("Bytecode loads"), Probe.Loads, Probe.bReuseBytecode ? Count - 1 : 0))
+            !Test.TestEqual(TEXT("Source builds"), Probe.Builds, bReuseBytecode ? 1 : Count) ||
+            !Test.TestEqual(TEXT("Bytecode loads"), Probe.Loads, bReuseBytecode ? Count - 1 : 0))
             return false;
 
         if (Pair > 0)
@@ -157,12 +157,12 @@ static bool CompareStartup(FAutomationTestBase& Test, EStartupMode Baseline, ESt
             case EStartupMode::WorldSource: Label = TEXT("shared_api"); break;
             case EStartupMode::WorldBytecode: Label = TEXT("world_bytecode"); break;
             }
-            Test.AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d registrations=%d builds=%d loads=%d bytes=%d ")
+            Test.AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d registrations=%d builds=%d loads=%d bytes=%lld ")
                 TEXT("total_ms=%.3f spawn_ms=%.3f file_ms=%.3f engine_ms=%.3f core_ms=%.3f ")
                 TEXT("providers_ms=%.3f sections_ms=%.3f module_ms=%.3f ")
                 TEXT("inspect_ms=%.3f vm_start_ms=%.3f component_and_loop_ms=%.3f"),
                 Pair, Label, Count, Probe.Registrations, Probe.Builds, Probe.Loads,
-                Probe.Bytecode.Num(), Ms(Total), Ms(Spawn), Ms(File), Ms(Engine), Ms(Core), Ms(Providers),
+                Probe.PayloadBytes(), Ms(Total), Ms(Spawn), Ms(File), Ms(Engine), Ms(Core), Ms(Providers),
                 Ms(Sections), Ms(Module), Ms(Inspect), Ms(Start), Ms(Other)));
         }
         return true;
@@ -240,14 +240,51 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedIsolation, "AngelIO.Missions.Shar
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBytecodeIsolation, "AngelIO.Missions.WorldBytecodeIsolation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCacheRevisions, "AngelIO.Missions.BytecodeCacheRevisions",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCacheRevisions::RunTest(const FString&)
+{
+    // Worldless validation collects the provider's current wrapper body on every compile.
+    struct FProvider final : IAngelIOScriptAPI
+    {
+        FProvider() { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
+        ~FProvider() { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
+        bool RegisterBindings(asIScriptEngine&) override { return true; }
+        void GetScriptWrappers(TArray<FAngelIOScriptWrapper>& Out) const override
+        {
+            Out.Add({TEXT("int CacheValue()"), FString::Printf(TEXT("return %d;"), Value)});
+        }
+        int32 Value = 2;
+    } Provider;
+    FAngelIOStartupProbe Probe(3);
+    TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
+    auto Run = [this, &Probe](const FString& Source, int32 Expected, int32 Builds, int32 Hits)
+    {
+        FAngelIOProgram Mission;
+        FAngelIOValue Output;
+        return TestTrue(TEXT("Execute the requested revision"), Mission.Compile(TEXT("Revision.as"), Source) &&
+            Mission.Start({}) && Mission.GetOutput(TEXT("Value"), Output) && Output.Integer == Expected) &&
+            TestEqual(TEXT("Source builds"), Probe.Builds, Builds) && TestEqual(TEXT("Cache hits"), Probe.Loads, Hits) &&
+            TestEqual(TEXT("One retained revision per label"), Probe.CacheEntries(), 1);
+    };
+    const FString First = TEXT("int out_Value; void Run() { out_Value = CacheValue(); }");
+    const FString Edited = TEXT("int out_Value; void Run() { out_Value = 1 + CacheValue(); }");
+    if (!Run(First, 2, 1, 0) || !Run(First, 2, 1, 1) || !Run(Edited, 3, 2, 1)) return false;
+    Provider.Value = 7;
+    if (!Run(Edited, 8, 3, 1)) return false;
+    FAngelIOProgram Invalid;
+    return TestFalse(TEXT("Broken edit fails to compile"), Invalid.Compile(TEXT("Revision.as"), TEXT("void Run("))) &&
+        Run(Edited, 8, 4, 2);
+}
+
 static bool CheckIsolation(FAutomationTestBase& Test, bool bReuseBytecode)
 {
     constexpr int32 Count = 1000;
     FTestWorldWrapper Scene;
     if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
     UWorld* World = Scene.GetTestWorld();
-    FAngelIOStartupProbe Probe;
-    Probe.bReuseBytecode = bReuseBytecode;
+    FAngelIOStartupProbe Probe(bReuseBytecode ? 1 : 0);
     TArray<TUniquePtr<FAngelIOProgram>> Missions;
     for (int32 I = 0; I < Count; ++I)
     {

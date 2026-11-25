@@ -40,6 +40,22 @@ FAngelIOStartupProbe*& FAngelIOStartupProbe::Current()
     return Active;
 }
 
+int64 FAngelIOStartupProbe::PayloadBytes() const
+{
+    int64 Total = 0;
+    for (const auto& Entry : Entries) Total += Entry.Bytes.Num();
+    return Total;
+}
+
+uint64 FAngelIOStartupProbe::CacheHeapBytes() const
+{
+    uint64 Total = Entries.GetAllocatedSize();
+    for (const auto& Entry : Entries)
+        Total += Entry.Label.GetAllocatedSize() + Entry.Source.GetAllocatedSize() +
+            Entry.Wrappers.GetAllocatedSize() + Entry.Bytes.GetAllocatedSize();
+    return Total;
+}
+
 int FAngelIOStartupProbe::Build(asIScriptModule& Module, UWorld* World, const FString& Label,
     const FString& Source, const FString& Wrappers)
 {
@@ -48,31 +64,36 @@ int FAngelIOStartupProbe::Build(asIScriptModule& Module, UWorld* World, const FS
     auto& Probe = *Active;
     Probe.ModuleBegin = FPlatformTime::Cycles64();
     int Result;
-    if (Probe.bReuseBytecode && !Probe.Bytecode.IsEmpty() && Probe.CachedWorld == TWeakObjectPtr<UWorld>(World) &&
-        Probe.CachedLabel.Equals(Label, ESearchCase::CaseSensitive) &&
-        Probe.CachedSource.Equals(Source, ESearchCase::CaseSensitive) &&
-        Probe.CachedWrappers.Equals(Wrappers, ESearchCase::CaseSensitive))
+    const int32 Index = Probe.Entries.IndexOfByPredicate([&](const FEntry& Entry)
+    {
+        return Entry.World == TWeakObjectPtr<UWorld>(World) && Entry.Label.Equals(Label, ESearchCase::CaseSensitive);
+    });
+    if (Index != INDEX_NONE && Probe.Entries[Index].Source.Equals(Source, ESearchCase::CaseSensitive) &&
+        Probe.Entries[Index].Wrappers.Equals(Wrappers, ESearchCase::CaseSensitive))
     {
         ++Probe.Loads;
-        FBytecodeStream Stream(Probe.Bytecode);
+        FBytecodeStream Stream(Probe.Entries[Index].Bytes);
         Result = Module.LoadByteCode(&Stream);
     }
     else
     {
         ++Probe.Builds;
         Result = Module.Build();
-        if (Result >= 0 && Probe.bReuseBytecode)
+        if (Result >= 0 && Probe.Capacity > 0)
         {
             TArray<uint8> Bytes;
             FBytecodeStream Stream(Bytes);
             Result = Module.SaveByteCode(&Stream, /*stripDebugInfo=*/false);
             if (Result >= 0)
             {
-                Probe.Bytecode = MoveTemp(Bytes);
-                Probe.CachedWorld = World;
-                Probe.CachedLabel = Label;
-                Probe.CachedSource = Source;
-                Probe.CachedWrappers = Wrappers;
+                if (Index != INDEX_NONE)
+                    Probe.Entries.RemoveAt(Index, EAllowShrinking::No);
+                else if (Probe.Entries.Num() == Probe.Capacity)
+                {
+                    Probe.Entries.RemoveAt(0, EAllowShrinking::No);
+                    ++Probe.Evictions;
+                }
+                Probe.Entries.Add({World, Label, Source, Wrappers, MoveTemp(Bytes)});
             }
         }
     }
