@@ -13,6 +13,7 @@
 #include <string_view>
 #include <algorithm>
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+#include "Misc/ScopeExit.h"
 #include "Tests/AngelIOStartupProbe.h"
 #define ANGELIO_BENCHMARK_MARK(Field) FAngelIOStartupProbe::Mark(&FAngelIOStartupProbe::Field)
 #else
@@ -51,6 +52,9 @@ namespace
         TOptional<double> Deadline;
         TSharedPtr<FJsonObject> WaitSite;
         FString Label;
+#if WITH_EDITOR
+        int32 WaitLine = 0;
+#endif
     };
     constexpr asPWORD ExecutionKey = 0x41494F;
 
@@ -72,6 +76,20 @@ namespace
         return Scope;
     }
 
+    struct FMissionFrame
+    {
+        asUINT Index = 0;
+        const char* Section = nullptr;
+        int32 Line = 0;
+
+        explicit FMissionFrame(asIScriptContext& Context)
+        {
+            Line = Context.GetLineNumber(Index, nullptr, &Section);
+            while (Section && FCStringAnsi::Strcmp(Section, "AngelIO API") == 0 && Index + 1 < Context.GetCallstackSize())
+                Line = Context.GetLineNumber(++Index, nullptr, &Section);
+        }
+    };
+
     TSharedRef<FJsonObject> CaptureSite()
     {
         auto Site = MakeShared<FJsonObject>();
@@ -81,14 +99,10 @@ namespace
         if (!Scope) return Site;
         Site->SetStringField(TEXT("instanceId"), Scope->InstanceId.ToString(EGuidFormats::DigitsWithHyphensLower));
         if (Scope->BranchId.IsValid()) Site->SetStringField(TEXT("branchId"), Scope->BranchId.ToString(EGuidFormats::DigitsWithHyphensLower));
-        const char* Section = nullptr;
-        asUINT Frame = 0;
-        int Line = Context->GetLineNumber(Frame, nullptr, &Section);
-        while (Section && FCStringAnsi::Strcmp(Section, "AngelIO API") == 0 && Frame + 1 < Context->GetCallstackSize())
-            Line = Context->GetLineNumber(++Frame, nullptr, &Section);
-        Site->SetNumberField(TEXT("line"), Line);
-        if (Section) Site->SetStringField(TEXT("script"), UTF8_TO_TCHAR(Section));
-        if (auto* Function = Context->GetFunction(Frame))
+        const FMissionFrame Frame(*Context);
+        Site->SetNumberField(TEXT("line"), Frame.Line);
+        if (Frame.Section) Site->SetStringField(TEXT("script"), UTF8_TO_TCHAR(Frame.Section));
+        if (auto* Function = Context->GetFunction(Frame.Index))
             Site->SetStringField(TEXT("function"), UTF8_TO_TCHAR(Function->GetDeclaration()));
         if (auto* Component = Scope->Component.Get())
         {
@@ -207,7 +221,12 @@ TSharedRef<const EAngelIOWaitOutcome> AngelIO::AwaitOperation(TSharedRef<FAngelI
     Scope->WaitOutcome = Outcome;
     if (TimeoutSeconds.IsSet()) Scope->Deadline = Scope->World->GetTimeSeconds() + *TimeoutSeconds;
     Scope->Label = Label.IsEmpty() ? TEXT("Operation") : Label;
-    asGetActiveContext()->Suspend();
+    auto* Context = asGetActiveContext();
+#if WITH_EDITOR
+    // After the SDK returns from this native call, its program counter may point at the next statement.
+    Scope->WaitLine = FMissionFrame(*Context).Line;
+#endif
+    Context->Suspend();
     return Outcome;
 }
 
@@ -224,9 +243,36 @@ void AngelIO::AwaitCondition(const FString& Label, const FString& Target, TOptio
     else if (*Outcome == EAngelIOWaitOutcome::Detached) Condition->Detach();
 }
 
+struct FAngelIOModuleBindings
+{
+    TArray<FAngelIOScriptWrapper> Wrappers;
+#if WITH_EDITOR
+    TArray<FAngelIOMapLookup> MapLookups{{TEXT("SendTo"), nullptr, false}};
+#endif
+};
+
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+// Owned by this cohort and its live mission modules. Providers stay loaded throughout the experiment.
+struct FAngelIOBenchmarkEngine
+{
+    asIScriptEngine* Engine;
+    FAngelIOModuleBindings Bindings;
+    TArray<FString> Declarations;
+    uint32 NextModule = 0;
+
+    explicit FAngelIOBenchmarkEngine(asIScriptEngine* InEngine) : Engine(InEngine) {}
+    ~FAngelIOBenchmarkEngine() { Engine->ShutDownAndRelease(); }
+};
+#endif
+
 struct FAngelIOProgram::FImpl
 {
     asIScriptEngine* Engine = nullptr;
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    TSharedPtr<FAngelIOBenchmarkEngine> SharedEngine;
+    bool PrepareSharedModule(FAngelIOStartupProbe& Probe, FAngelIOModuleBindings& Bindings);
+#endif
+    bool RegisterAPI(FAngelIOModuleBindings& Bindings);
     asIScriptModule* Module = nullptr;
     asIScriptContext* Context = nullptr;
     TArray<FAngelIODiagnostic> Messages;
@@ -380,6 +426,12 @@ struct FAngelIOProgram::FImpl
         if (Scope.Condition) Scope.Condition->Detach();
         if (Context) Context->Release();
         if (Root) --Root->ChildCount;
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+        else if (SharedEngine)
+        {
+            if (Module) Module->Discard();
+        }
+#endif
         else if (Engine) Engine->ShutDownAndRelease();
     }
 
@@ -438,6 +490,9 @@ struct FAngelIOProgram::FImpl
         if (bWait)
         {
             Self.Waiting = *Name;
+#if WITH_EDITOR
+            Self.Scope.WaitLine = FMissionFrame(*Ctx).Line;
+#endif
             Ctx->Suspend();
         }
         else
@@ -760,80 +815,127 @@ bool FAngelIOProgram::CompileFile(const FString& RelativeScript)
     return Compile(RelativeScript, Source);
 }
 
-bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
+bool FAngelIOProgram::FImpl::RegisterAPI(FAngelIOModuleBindings& Bindings)
 {
-    ANGELIO_BENCHMARK_MARK(CompileBegin);
-    Impl = MakeUnique<FImpl>();
-    auto& S = *Impl;
-    S.Engine = asCreateScriptEngine();
+    Engine = asCreateScriptEngine();
     ANGELIO_BENCHMARK_MARK(EngineCreated);
-    S.ScriptSection = Label;
-#if WITH_EDITOR
-    TArray<FAngelIOMapLookup> MapLookups{{TEXT("SendTo"), nullptr, false}};
-#endif
-    if (!S.Engine) return S.Fail(TEXT("Could not create AngelScript engine"));
-    RegisterStdString(S.Engine);
-    if (S.Engine->SetMessageCallback(asFUNCTION(FImpl::CompilerMessage), &S, asCALL_CDECL) < 0 ||
-        S.Engine->SetEngineProperty(asEP_INIT_GLOBAL_VARS_AFTER_BUILD, false) < 0 ||
-        S.Engine->SetDefaultNamespace("AngelIOInternal") < 0 ||
-        S.Engine->RegisterGlobalFunction("void WaitFor(const ?&in)", asFUNCTION(FImpl::Wait), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void Emit(const ?&in, int)", asFUNCTION(FImpl::Emit), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void EndOn(const ?&in)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void Notify(const ?&in, int)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
-        S.Engine->SetDefaultNamespace("") < 0 ||
-        S.Engine->RegisterFuncdef("void MissionBranch()") < 0 ||
-        S.Engine->RegisterGlobalFunction("void Fork(MissionBranch@+ entry)", asFUNCTION(FImpl::Fork), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void WaitSeconds(float seconds)", asFUNCTION(FImpl::WaitSeconds), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("string LoadCheckpoint(int version = 1)", asFUNCTION(FImpl::LoadCheckpoint), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
-        S.Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
-        return S.Fail(TEXT("Could not register AngelIO script API"));
+    if (!Engine) return Fail(TEXT("Could not create AngelScript engine"));
+    RegisterStdString(Engine);
+    if (Engine->SetMessageCallback(asFUNCTION(FImpl::CompilerMessage), this, asCALL_CDECL) < 0 ||
+        Engine->SetEngineProperty(asEP_INIT_GLOBAL_VARS_AFTER_BUILD, false) < 0 ||
+        Engine->SetDefaultNamespace("AngelIOInternal") < 0 ||
+        Engine->RegisterGlobalFunction("void WaitFor(const ?&in)", asFUNCTION(FImpl::Wait), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void Emit(const ?&in, int)", asFUNCTION(FImpl::Emit), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void EndOn(const ?&in)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void Notify(const ?&in, int)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
+        Engine->SetDefaultNamespace("") < 0 ||
+        Engine->RegisterFuncdef("void MissionBranch()") < 0 ||
+        Engine->RegisterGlobalFunction("void Fork(MissionBranch@+ entry)", asFUNCTION(FImpl::Fork), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void WaitSeconds(float seconds)", asFUNCTION(FImpl::WaitSeconds), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("string LoadCheckpoint(int version = 1)", asFUNCTION(FImpl::LoadCheckpoint), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
+        return Fail(TEXT("Could not register AngelIO script API"));
     ANGELIO_BENCHMARK_MARK(CoreRegistered);
-    auto& Engine = *S.Engine;
-    const auto FirstFunction = Engine.GetGlobalFunctionCount();
-    const auto FirstType = Engine.GetObjectTypeCount();
-    const auto FirstEnum = Engine.GetEnumCount();
-    TArray<FAngelIOScriptWrapper> Wrappers;
+    auto& SDK = *Engine;
+    const auto FirstFunction = SDK.GetGlobalFunctionCount();
+    const auto FirstType = SDK.GetObjectTypeCount();
+    const auto FirstEnum = SDK.GetEnumCount();
     for (auto* Provider : IModularFeatures::Get().GetModularFeatureImplementations<IAngelIOScriptAPI>(
         IAngelIOScriptAPI::FeatureName()))
     {
-        if (!Provider->RegisterBindings(Engine) || Engine.SetDefaultNamespace("") < 0)
-            return S.Fail(TEXT("Could not register external AngelIO script bindings"));
-        Provider->GetScriptWrappers(Wrappers);
+        if (!Provider->RegisterBindings(SDK) || SDK.SetDefaultNamespace("") < 0)
+            return Fail(TEXT("Could not register external AngelIO script bindings"));
+        Provider->GetScriptWrappers(Bindings.Wrappers);
 #if WITH_EDITOR
-        Provider->GetMapLookups(MapLookups);
+        Provider->GetMapLookups(Bindings.MapLookups);
 #endif
     }
-    for (asUINT I = FirstFunction; I < Engine.GetGlobalFunctionCount(); ++I)
+    for (asUINT I = FirstFunction; I < SDK.GetGlobalFunctionCount(); ++I)
     {
-        const auto* Function = Engine.GetGlobalFunctionByIndex(I);
+        const auto* Function = SDK.GetGlobalFunctionByIndex(I);
         if (FCStringAnsi::Strcmp(Function->GetNamespace(), "AngelIOInternal") != 0)
-            S.ExternalAPI.Add(UTF8_TO_TCHAR(Function->GetDeclaration(true, true, true)));
+            ExternalAPI.Add(UTF8_TO_TCHAR(Function->GetDeclaration(true, true, true)));
     }
-    for (asUINT I = FirstType; I < Engine.GetObjectTypeCount(); ++I)
+    for (asUINT I = FirstType; I < SDK.GetObjectTypeCount(); ++I)
     {
-        auto* Type = Engine.GetObjectTypeByIndex(I);
-        S.ExternalAPI.Add(UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)));
+        auto* Type = SDK.GetObjectTypeByIndex(I);
+        ExternalAPI.Add(UTF8_TO_TCHAR(SDK.GetTypeDeclaration(Type->GetTypeId(), true)));
         for (asUINT M = 0; M < Type->GetMethodCount(); ++M)
-            S.ExternalAPI.Add(UTF8_TO_TCHAR(Type->GetMethodByIndex(M)->GetDeclaration(true, true, true)));
+            ExternalAPI.Add(UTF8_TO_TCHAR(Type->GetMethodByIndex(M)->GetDeclaration(true, true, true)));
     }
-    for (asUINT I = FirstEnum; I < Engine.GetEnumCount(); ++I)
+    for (asUINT I = FirstEnum; I < SDK.GetEnumCount(); ++I)
     {
-        auto* Type = Engine.GetEnumByIndex(I);
+        auto* Type = SDK.GetEnumByIndex(I);
         TArray<FString> Names;
         for (asUINT N = 0; N < Type->GetEnumValueCount(); ++N)
         {
             asINT64 Value;
             Names.Add(UTF8_TO_TCHAR(Type->GetEnumValueByIndex(N, &Value)));
         }
-        S.ExternalAPI.Add(FString::Printf(TEXT("enum %s { %s }"),
-            UTF8_TO_TCHAR(Engine.GetTypeDeclaration(Type->GetTypeId(), true)), *FString::Join(Names, TEXT(", "))));
+        ExternalAPI.Add(FString::Printf(TEXT("enum %s { %s }"),
+            UTF8_TO_TCHAR(SDK.GetTypeDeclaration(Type->GetTypeId(), true)), *FString::Join(Names, TEXT(", "))));
     }
     ANGELIO_BENCHMARK_MARK(ProvidersInspected);
-    S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    if (auto* Probe = FAngelIOStartupProbe::Current()) ++Probe->Registrations;
+#endif
+    return true;
+}
+
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+bool FAngelIOProgram::FImpl::PrepareSharedModule(FAngelIOStartupProbe& Probe, FAngelIOModuleBindings& Bindings)
+{
+    if (!Probe.SharedEngine)
+    {
+        if (!RegisterAPI(Bindings)) return false;
+        SharedEngine = MakeShared<FAngelIOBenchmarkEngine>(Engine);
+        SharedEngine->Bindings = Bindings;
+        SharedEngine->Declarations = ExternalAPI;
+        Probe.SharedEngine = SharedEngine;
+    }
+    else
+    {
+        SharedEngine = Probe.SharedEngine;
+        Engine = SharedEngine->Engine;
+        ANGELIO_BENCHMARK_MARK(EngineCreated);
+        ANGELIO_BENCHMARK_MARK(CoreRegistered);
+        if (Engine->SetMessageCallback(asFUNCTION(FImpl::CompilerMessage), this, asCALL_CDECL) < 0)
+            return Fail(TEXT("Could not route shared engine diagnostics"));
+        ExternalAPI = SharedEngine->Declarations;
+        Bindings = SharedEngine->Bindings; // Map validation may remove shadowed names from this copy.
+        ANGELIO_BENCHMARK_MARK(ProvidersInspected);
+    }
+    const FString Name = FString::Printf(TEXT("mission_%u"), ++SharedEngine->NextModule);
+    Module = Engine->GetModule(TCHAR_TO_UTF8(*Name), asGM_ALWAYS_CREATE);
+    return Module || Fail(TEXT("Could not create shared engine mission module"));
+}
+#endif
+
+bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
+{
+    ANGELIO_BENCHMARK_MARK(CompileBegin);
+    Impl = MakeUnique<FImpl>();
+    auto& S = *Impl;
+    S.ScriptSection = Label;
+    FAngelIOModuleBindings Bindings;
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    // The SDK callback is engine-wide. Keep the per-mission destination only for this compile.
+    ON_SCOPE_EXIT { if (S.SharedEngine) S.Engine->ClearMessageCallback(); };
+    auto* Probe = FAngelIOStartupProbe::Current();
+    if (Probe && Probe->bShareRegistrations)
+    {
+        if (!S.PrepareSharedModule(*Probe, Bindings)) return false;
+    }
+    else
+#endif
+    {
+        if (!S.RegisterAPI(Bindings)) return false;
+        S.Module = S.Engine->GetModule("level", asGM_ALWAYS_CREATE);
+    }
     FString WrapperSource;
-    for (const auto& Wrapper : Wrappers)
+    for (const auto& Wrapper : Bindings.Wrappers)
     {
         WrapperSource += Wrapper.Declaration + TEXT(" { ") + Wrapper.Body + TEXT(" }\n");
         S.ExternalAPI.Add(Wrapper.Declaration);
@@ -856,7 +958,7 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source)
     }
     S.Status = EAngelIOState::Compiled;
 #if WITH_EDITOR
-    S.ReadMapTargets({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())}, MapLookups);
+    S.ReadMapTargets({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())}, Bindings.MapLookups);
     S.ReadPortDefaults({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
 #endif
     ANGELIO_BENCHMARK_MARK(CompileEnd);
@@ -1016,14 +1118,7 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     {
         for (const auto& Child : Parent.Children)
         {
-            int32 Line = 0;
-            for (asUINT Frame = 0; Frame < Child->Context->GetCallstackSize(); ++Frame)
-            {
-                const char* Section = nullptr;
-                Line = Child->Context->GetLineNumber(Frame, nullptr, &Section);
-                if (Section && Child->ScriptSection == UTF8_TO_TCHAR(Section)) break;
-            }
-            Info.BranchWaits.Add(FString::Printf(TEXT("%s · %s:%d · %s"), *Child->BranchName, *Child->ScriptSection, Line, *Child->Waiting));
+            Info.BranchWaits.Add(FString::Printf(TEXT("%s · %s:%d · %s"), *Child->BranchName, *Child->ScriptSection, Child->Scope.WaitLine, *Child->Waiting));
             Visit(Visit, *Child);
         }
     };
@@ -1031,17 +1126,7 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     if (Info.State != EAngelIOState::Waiting) return Info;
     Info.Waiting = Impl->Waiting;
     if (Impl->Scope.Pending) Info.Operation = Impl->Scope.Pending->GetOperationId();
-    // WaitFor has a generated wrapper. Report the first frame in the mission file.
-    for (asUINT Frame = 0; Frame < Impl->Context->GetCallstackSize(); ++Frame)
-    {
-        const char* Section = nullptr;
-        const int Line = Impl->Context->GetLineNumber(Frame, nullptr, &Section);
-        if (Line > 0 && Section && Info.Script.Equals(UTF8_TO_TCHAR(Section), ESearchCase::CaseSensitive))
-        {
-            Info.Line = Line;
-            break;
-        }
-    }
+    Info.Line = Impl->Scope.WaitLine;
     return Info;
 }
 #endif

@@ -16,6 +16,7 @@ public:
 
 private:
     friend class FAngelIOInspectorPIE;
+    friend class FAngelIOSharedInspectorPIE;
     friend class FAngelIOCheckpointListen;
     friend class FAngelIOCheckpointRestart;
     struct FOperation

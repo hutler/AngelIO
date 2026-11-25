@@ -272,6 +272,8 @@ The release guide includes measured startup, memory and frame cost for 1–1000 
 
 For 1000 instances of the same mission, the guide also breaks down actor creation, API registration, compilation and VM startup, and measures the saving from loading bytecode. [Startup profile](Docs/AgentGuide.md#where-startup-time-goes)
 
+An editor experiment reduced the mean startup time for those 1000 missions from 488.9 to 237.6 ms by registering the API once. The guide includes the paired benchmark and multiplayer isolation checks. [Shared registration results](Docs/AgentGuide.md#registering-the-api-once-for-1000-missions)
+
 ```powershell
 node Tools/MCP/smoke.mjs --project "$PWD/AngelIO.uproject" --editor $editor
 ```

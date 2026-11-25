@@ -20,6 +20,8 @@ void Run()
     Fork(Blink);
     TripResult@ result = lift.MoveTo(4, 400.0f).Wait();
     Notify(InputSignal::RideEnded);
+    // A due blink can still run in this tick before the queued signal is delivered.
+    WaitFor(InputSignal::RideEnded);
     out_Lamp = false;
     if (result.Status == TripStatus::Arrived)
         WaitFor(InputSignal::Confirm);

@@ -7,6 +7,7 @@
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOTraceSubsystem.h"
 #include "SAngelIOMissionInspector.h"
+#include "Tests/AngelIOStartupProbe.h"
 #include "Framework/Docking/TabManager.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Dom/JsonObject.h"
@@ -725,7 +726,7 @@ bool FAngelIOBranchListen::RunTest(const FString&)
             auto Info = Panel->InspectMission();
             TestEqual(TEXT("Parent awaits the specific ride"), Info.Waiting, FString(TEXT("LiftTrip.Wait")));
             TestTrue(TEXT("Inspector identifies child, source and timer"), Info.BranchWaits.Num() == 1 &&
-                Info.BranchWaits[0].Contains(TEXT("Blink · Examples/BlinkPanel.as:")) && Info.BranchWaits[0].EndsWith(TEXT("WaitSeconds")));
+                Info.BranchWaits[0] == TEXT("Blink · Examples/BlinkPanel.as:12 · WaitSeconds"));
             if (!Room->FirstRun.IsValid()) Room->FirstRun = Info.Instance;
             else TestNotEqual(TEXT("Reloaded room has a fresh branch owner"), Info.Instance, Room->FirstRun);
             return true;
@@ -749,6 +750,22 @@ bool FAngelIOBranchListen::RunTest(const FString&)
         return true;
     });
     StartRoom();
+    Steps(TEXT("hold the panel until its timer and ride are both ready"), [Room]
+    {
+        auto* Panel = DeliveryPanel(Room->Host.Get());
+        Panel->SetComponentTickEnabled(false);
+        Room->CheckAfter = Panel->GetWorld()->GetTimeSeconds() + 0.2;
+        return true;
+    });
+    Steps(TEXT("resume the overdue blink and arrival in one tick"), [Room]
+    {
+        auto* Panel = DeliveryPanel(Room->Host.Get());
+        auto* Lift = FindLift(Panel->GetWorld(), 2);
+        if (Panel->GetWorld()->GetTimeSeconds() < Room->CheckAfter || !Lift || !Lift->IsReadyForTrip() ||
+            !TripOutput(Lift->Mission.Get(), TEXT("LastFloor"), 4)) return false;
+        Panel->SetComponentTickEnabled(true);
+        return true;
+    });
     Steps(TEXT("arrival ends blinking"), [this, Room]
     {
         auto* Panel = DeliveryPanel(Room->Client.Get());
@@ -1473,6 +1490,77 @@ bool FAngelIOTypedListen::RunTest(const FString&)
         TestEqual(TEXT("Concurrent short ride"), Status.FindRef(Trips.FindRef(4)), FString(TEXT("Arrived")));
         TestEqual(TEXT("Host rejection"), Status.FindRef(Trips.FindRef(7)), FString(TEXT("Rejected")));
         TestEqual(TEXT("Remote cancellation"), Status.FindRef(Trips.FindRef(1)), FString(TEXT("Cancelled")));
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedInspectorPIE, "AngelIO.Network.ListenServer.SharedRegistrationInspector",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOSharedInspectorPIE::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    struct FPanels
+    {
+        TWeakObjectPtr<UAngelIOScriptComponent> Local, Remote, Replica;
+        TWeakPtr<FAngelIOBenchmarkEngine> Engine;
+    };
+    const auto Panels = MakeShared<FPanels>();
+    const auto Inspector = SNew(SAngelIOMissionInspector);
+    auto Step = ListenSteps(this);
+    StartListenSession();
+    Step(TEXT("restart both authority panels on one registered engine"), [this, Panels]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!AtFloor(Host, 2, 2, 1) || !AtFloor(Client, 2, 2, 1)) return false;
+        auto* PC = Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || PC->TripPanel->GetWaitingSignal() != TEXT("CallLift")) return false;
+        for (auto It = Host->GetPlayerControllerIterator(); It; ++It)
+            if (auto* Player = Cast<AAngelIOPlayerController>(It->Get()))
+                (Player->IsLocalController() ? Panels->Local : Panels->Remote) = Player->TripPanel.Get();
+        if (!Panels->Local.IsValid() || !Panels->Remote.IsValid()) return false;
+        Panels->Replica = PC->TripPanel.Get();
+        {
+            FAngelIOStartupProbe Probe;
+            Probe.bShareRegistrations = true;
+            TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
+            if (!TestTrue(TEXT("Both panels started"), Panels->Local->StartScript() && Panels->Remote->StartScript()) ||
+                !TestEqual(TEXT("Registered the lift provider cohort once"), Probe.Registrations, 1)) return true;
+            Panels->Engine = Probe.SharedEngine;
+        }
+        PC->LiftTrip(4, 200);
+        return true;
+    });
+    Step(TEXT("inspect simultaneous signal and trip waits"), [this, Inspector, Panels]
+    {
+        if (Panels->Replica->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+        Inspector->SelectWorld(FindPeer(NM_Client));
+        Inspector->SelectMission(Panels->Replica);
+        TestEqual(TEXT("Client selection shows the authoritative trip wait"), Inspector->Location, FString(TEXT("TypedLift.as:22")));
+        TestTrue(TEXT("Remote panel waits for a particular ride"), Inspector->Inspection.Operation.IsValid());
+        Inspector->SelectWorld(FindPeer(NM_ListenServer));
+        Inspector->SelectMission(Panels->Local);
+        TestEqual(TEXT("Local panel is still at the input wait"), Inspector->Location, FString(TEXT("TypedLift.as:11")));
+        TestTrue(TEXT("Local panel handles an independent rejected call"), Panels->Local->SendSignal(TEXT("CallLift"), 7) &&
+            TripOutput(Panels->Local.Get(), TEXT("Completed"), 1));
+        TestTrue(TEXT("Remote panel's completion counter is still zero"), TripOutput(Panels->Remote.Get(), TEXT("Completed"), 0));
+        Panels->Local->StopScript();
+        TestTrue(TEXT("Outstanding native wait retains the engine"), Panels->Engine.IsValid());
+        return true;
+    });
+    Step(TEXT("surviving module finishes its ride and replicates its floor"), [this, Inspector, Panels]
+    {
+        if (!TripOutput(Panels->Replica.Get(), TEXT("Completed"), 1) ||
+            !TripOutput(Panels->Replica.Get(), TEXT("LastFloor"), 4)) return false;
+        Inspector->SelectWorld(FindPeer(NM_Client));
+        Inspector->SelectMission(Panels->Replica);
+        TestEqual(TEXT("Surviving panel resumes at the correct line"), Inspector->Location, FString(TEXT("TypedLift.as:11")));
+        TestEqual(TEXT("Surviving panel is ready for input"), Inspector->Inspection.Waiting, FString(TEXT("CallLift")));
+        Panels->Remote->StopScript();
+        TestFalse(TEXT("Last stopped panel releases the shared engine"), Panels->Engine.IsValid());
         return true;
     });
     EndListenSession();

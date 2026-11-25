@@ -191,9 +191,11 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
 | `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
-| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart`, `BlinkBranches` and `PartitionLanding` using networked PIE |
+| `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `SharedRegistrationInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart`, `BlinkBranches` and `PartitionLanding` using networked PIE |
 | `AngelIO.Performance.WaitingMissions` | Startup, process resident-memory growth and baseline/loaded frame time for 1, 100 and 1000 independently ticking mission components |
 | `AngelIO.Performance.MissionStartup` | Paired startup measurements for 1000 instances of the same script, with per-phase timings and a bytecode reuse experiment |
+| `AngelIO.Performance.SharedRegistration` | Paired source builds with one registered engine per mission or per batch of 1000 missions |
+| `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |
 | `AngelIO.Trace.` | Independent waiters, detachment, bounded history and long-running operations |
 
 To verify a process restart, run the automation command above twice with the filter `AngelIO.Network.ListenServer.CheckpointRestart`. Generate a fresh GUID with `[guid]::NewGuid()`. Add `-AngelIORestartTestWrite=<guid>` to the first editor invocation and `-AngelIORestartTestRead=<guid>` to the second. The first host delivers to floor 4 and exits. The second host restores `Delivered` and accepts confirmation. The test checks floor 4, the physical cab position and zero new trips on both peers, and zero delivery calls in the new host's trace. Successful completion removes the isolated test slot.
@@ -247,9 +249,39 @@ These are arithmetic means in milliseconds per 1000 starts over six paired runs 
 | Component creation, registration, state publication and loop overhead | 15.2 | 15.0 |
 | **Total** | **507.2** | **448.6** |
 
-On the source path, `CompileFile` accounted for 428.0 ms including file access. The SDK's `Build()` itself accounted for 88.9 ms. Reusing bytecode saved 52.8 ms inside the module step and 58.6 ms end to end (11.6%, with savings of 54.5–63.2 ms across pairs). The largest cost was repeating core and provider registration and collecting declarations, at 225.5 ms. Defer a persistent bytecode cache for this short mission. The next experiment should measure reusing those registrations while keeping per-mission globals, waits and debugger locations independent. A level with longer scripts can rerun the comparison with its own workload.
+On the source path, `CompileFile` accounted for 428.0 ms including file access. The SDK's `Build()` itself accounted for 88.9 ms. Reusing bytecode saved 52.8 ms inside the module step and 58.6 ms end to end (11.6%, with savings of 54.5–63.2 ms across pairs). The largest cost was repeating core and provider registration and collecting declarations, at 225.5 ms. Defer a persistent bytecode cache for this short mission.
 
 To reproduce, use the Unreal Automation command above with `$filter = 'AngelIO.Performance.'`. Each `AngelIO startup pair=` log entry includes the phase timings, build and load counts, and bytecode size. The test checks the waiting state and initial output of every instance and verifies that the first and last retain separate mission IDs and the same valid source line. The bytecode path exists only in editor automation.
+
+#### Registering the API once for 1000 missions
+
+`AngelIO.Performance.SharedRegistration` compares two source builds of the same `TimedGate.as` workload in the same editor process. Each measured cohort pays for its first registration. In the shared cohort, each mission creates a uniquely named module and its own context on one engine. Every cohort performs 1000 file reads, 1000 source builds and zero bytecode loads. The game module and its native providers stay loaded through teardown. Engine sharing is enabled only inside editor automation.
+
+On the same Win64 machine, checking out tag `v0.6.2` and rerunning its source benchmark gave **520.5 ms** (published mean **507.2 ms**). The table reports the six alternating pairs from the new editor run. Both paths used the same timers and exact-line checks. The sums below group the individual phase timings from the log.
+
+| Work per 1000 starts | Private engines (ms) | One registered engine (ms) |
+| --- | ---: | ---: |
+| Spawn actors | 28.4 | 27.8 |
+| Resolve and read the script | 49.2 | 47.4 |
+| Acquire the engine and prepare per-mission storage | 39.4 | 1.4 |
+| Register or reuse the core and external API, including declaration metadata | 217.0 | 1.6 |
+| Create modules and prepare source sections | 13.9 | 23.5 |
+| Compile the 1000 modules from source | 86.1 | 83.3 |
+| Inspect the contract and editor metadata | 6.6 | 6.4 |
+| Initialize the VM and run to the first wait | 33.0 | 31.7 |
+| Component and loop overhead | 15.3 | 14.4 |
+| **Total** | **488.9** | **237.6** |
+
+One registration saved **251.4 ms (51.4%)** on average. Every paired run saved time, from 243.3 to 256.1 ms. This result supports testing a world-owned engine for runtime use. Streaming, world teardown and provider lifetime in a packaged game are the next acceptance cases.
+
+To reproduce the timing in isolation, set `$filter = 'AngelIO.Performance.SharedRegistration'` in the automation command above. Two separate tests cover behavior outside the timed loop.
+
+- `AngelIO.Missions.SharedRegistrationIsolation` starts 1000 instances of `Elevator.as` with distinct starting floors. It leaves one group idle, holds one in motion and completes one trip in each remaining instance. It checks every floor, trip count, wait, mission ID and source line (18 or 25), and checks diagnostic ownership after a sibling fails to compile.
+- `AngelIO.Network.ListenServer.SharedRegistrationInspector` restarts both player panels on one engine. The live inspector selects the client replica at `TypedLift.as:22` and the host panel at `TypedLift.as:11`. The host handles a rejected call and stops. The surviving panel completes its own ride, replicates floor 4 to the client and returns to line 11. The last panel releases the engine.
+
+The inspector now records the executing line when a native or signal wait begins. For example, an active timer in `TimedGate.as` shows line 6, even though the suspended SDK context has already advanced to line 7.
+
+In `Examples/BlinkPanel.as`, `Notify(RideEnded)` queues the signal that stops the blinking branch. The parent waits for its delivery before switching off the lamp. The listen-server regression holds the panel until the lift arrival and blink timer are both ready, then verifies the client sees the lamp off and the pulse counter stays fixed.
 
 `AngelIO.Network.ListenServer.PartitionLanding` uses the small partitioned map `/Game/Tests/PartitionLift`. The host and client move close enough to load the freight lift, ride to floor 4, leave its cell, and return. The test checks removal from the registry, restored physical height and zero new trips. The read half of `LandedBeforeDeliveredRestart` also connects a late client after the new server is already waiting for confirmation.
 

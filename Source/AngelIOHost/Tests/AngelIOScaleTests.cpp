@@ -65,16 +65,20 @@ bool FAngelIOScale::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOMissionStartup, "AngelIO.Performance.MissionStartup",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FAngelIOMissionStartup::RunTest(const FString&)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIORegistrationStartup, "AngelIO.Performance.SharedRegistration",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+static bool CompareStartup(FAutomationTestBase& Test, bool bCompareRegistrations)
 {
-    auto RunBatch = [this](int32 Pair, bool bReuseBytecode, int32 Count)
+    auto RunBatch = [&](int32 Pair, bool bCandidate, int32 Count)
     {
         FTestWorldWrapper Scene;
         if (!Scene.CreateTestWorld(EWorldType::Game) || !Scene.BeginPlayInTestWorld()) return false;
         UWorld* World = Scene.GetTestWorld();
         World->URL.AddOption(TEXT("AngelIOCheckpointSlot="));
         FAngelIOStartupProbe Probe;
-        Probe.bReuseBytecode = bReuseBytecode;
+        Probe.bReuseBytecode = bCandidate && !bCompareRegistrations;
+        Probe.bShareRegistrations = bCandidate && bCompareRegistrations;
         TArray<UAngelIOScriptComponent*> Missions;
         Missions.Reserve(Count);
         uint64 Spawn = 0, File = 0, Engine = 0, Core = 0, Providers = 0, Sections = 0;
@@ -98,7 +102,7 @@ bool FAngelIOMissionStartup::RunTest(const FString&)
                 Probe.ModuleEnd < Probe.ModuleBegin ||
                 Probe.CompileEnd < Probe.ModuleEnd || Probe.StartEnd < Probe.CompileEnd)
             {
-                AddError(FString::Printf(TEXT("Incomplete startup profile for mission %d"), I));
+                Test.AddError(FString::Printf(TEXT("Incomplete startup profile for mission %d"), I));
                 return false;
             }
             Spawn += ActorEnd - ActorBegin;
@@ -123,35 +127,104 @@ bool FAngelIOMissionStartup::RunTest(const FString&)
         });
         const auto First = Missions[0]->InspectMission();
         const auto Last = Missions.Last()->InspectMission();
-        if (!TestTrue(TEXT("Every TimedGate is waiting with its initial output"), bWaiting) ||
-            !TestTrue(TEXT("First and last have distinct VMs and the same mission source line"),
-                First.Instance.IsValid() && Last.Instance.IsValid() && First.Instance != Last.Instance &&
-                First.Line > 0 && First.Line == Last.Line && First.Script == Last.Script) ||
-            !TestEqual(TEXT("Source builds"), Probe.Builds, bReuseBytecode ? 1 : Count) ||
-            !TestEqual(TEXT("Bytecode loads"), Probe.Loads, bReuseBytecode ? Count - 1 : 0))
+        if (!Test.TestTrue(TEXT("Every TimedGate is waiting with its initial output"), bWaiting) ||
+            !Test.TestTrue(TEXT("First and last have distinct mission IDs"),
+                First.Instance.IsValid() && Last.Instance.IsValid() && First.Instance != Last.Instance) ||
+            !Test.TestEqual(TEXT("First mission script"), First.Script, FString(TEXT("Examples/TimedGate.as"))) ||
+            !Test.TestEqual(TEXT("Last mission script"), Last.Script, First.Script) ||
+            !Test.TestEqual(TEXT("First TimedGate wait line"), First.Line, 6) ||
+            !Test.TestEqual(TEXT("Last TimedGate wait line"), Last.Line, 6) ||
+            !Test.TestEqual(TEXT("API registrations"), Probe.Registrations, Probe.bShareRegistrations ? 1 : Count) ||
+            !Test.TestEqual(TEXT("Source builds"), Probe.Builds, Probe.bReuseBytecode ? 1 : Count) ||
+            !Test.TestEqual(TEXT("Bytecode loads"), Probe.Loads, Probe.bReuseBytecode ? Count - 1 : 0))
             return false;
 
         if (Pair > 0)
         {
             auto Ms = [](uint64 Cycles) { return FPlatformTime::ToMilliseconds64(Cycles); };
-            AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d builds=%d loads=%d bytes=%d ")
+            const TCHAR* Mode = Probe.bShareRegistrations ? TEXT("shared_api") : Probe.bReuseBytecode ? TEXT("bytecode") : TEXT("source");
+            Test.AddInfo(FString::Printf(TEXT("AngelIO startup pair=%d mode=%s count=%d registrations=%d builds=%d loads=%d bytes=%d ")
                 TEXT("total_ms=%.3f spawn_ms=%.3f file_ms=%.3f engine_ms=%.3f core_ms=%.3f ")
                 TEXT("providers_ms=%.3f sections_ms=%.3f module_ms=%.3f ")
                 TEXT("inspect_ms=%.3f vm_start_ms=%.3f component_and_loop_ms=%.3f"),
-                Pair, bReuseBytecode ? TEXT("bytecode") : TEXT("source"), Count, Probe.Builds, Probe.Loads,
+                Pair, Mode, Count, Probe.Registrations, Probe.Builds, Probe.Loads,
                 Probe.Bytecode.Num(), Ms(Total), Ms(Spawn), Ms(File), Ms(Engine), Ms(Core), Ms(Providers),
                 Ms(Sections), Ms(Module), Ms(Inspect), Ms(Start), Ms(Other)));
         }
         return true;
     };
 
-    // Warm the file and both SDK paths. Each measured bytecode cohort still pays its own first build and save.
+    // Warm both paths. Each measured cohort pays its own first engine registration and source build.
     if (!RunBatch(0, false, 8) || !RunBatch(0, true, 8)) return false;
     for (int32 Pair = 1; Pair <= 6; ++Pair)
     {
-        const bool bBytecodeFirst = Pair % 2 == 0;
-        if (!RunBatch(Pair, bBytecodeFirst, 1000) || !RunBatch(Pair, !bBytecodeFirst, 1000)) return false;
+        const bool bCandidateFirst = Pair % 2 == 0;
+        if (!RunBatch(Pair, bCandidateFirst, 1000) || !RunBatch(Pair, !bCandidateFirst, 1000)) return false;
     }
     return true;
+}
+
+bool FAngelIOMissionStartup::RunTest(const FString&) { return CompareStartup(*this, false); }
+bool FAngelIORegistrationStartup::RunTest(const FString&) { return CompareStartup(*this, true); }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedIsolation, "AngelIO.Missions.SharedRegistrationIsolation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOSharedIsolation::RunTest(const FString&)
+{
+    constexpr int32 Count = 1000;
+    FAngelIOStartupProbe Probe;
+    Probe.bShareRegistrations = true;
+    TArray<TUniquePtr<FAngelIOProgram>> Missions;
+    for (int32 I = 0; I < Count; ++I)
+    {
+        auto Mission = MakeUnique<FAngelIOProgram>();
+        FAngelIOValue Floor;
+        Floor.Integer = I + 1;
+        TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
+        if (!Mission->CompileFile(TEXT("Elevator.as")) || !Mission->Start({{TEXT("StartingFloor"), Floor}}))
+        {
+            AddError(FString::Printf(TEXT("Could not start shared mission %d"), I));
+            return false;
+        }
+        Missions.Add(MoveTemp(Mission));
+    }
+    if (!TestEqual(TEXT("All 1000 modules use one API registration"), Probe.Registrations, 1)) return false;
+    {
+        FAngelIOProgram Invalid;
+        TGuardValue<FAngelIOStartupProbe*> Capture(FAngelIOStartupProbe::Current(), &Probe);
+        if (!TestFalse(TEXT("A sibling module can fail to build"), Invalid.Compile(TEXT("Invalid.as"), TEXT("void Run() {\nUnknown();\n}"))) ||
+            !TestTrue(TEXT("The failing module owns its diagnostic"), Invalid.Diagnostics().ContainsByPredicate(
+                [](const auto& D) { return D.Severity == TEXT("error") && D.Line == 2; })) ||
+            !TestTrue(TEXT("A valid sibling retains clean diagnostics"), Missions.Last()->Diagnostics().IsEmpty())) return false;
+    }
+    const TWeakPtr<FAngelIOBenchmarkEngine> Lifetime = Probe.SharedEngine;
+    Probe.SharedEngine.Reset();
+    for (int32 I = 0; I < Count; ++I)
+    {
+        // Leave one group idle, one in motion and one back at the first wait after a completed trip.
+        if (I % 3 != 0 && !Missions[I]->Signal(TEXT("RequestFloor"), Count + I)) return false;
+        if (I % 3 == 2 && !Missions[I]->Signal(TEXT("MotionFinished"), Count + I)) return false;
+    }
+    TSet<FGuid> Instances;
+    for (int32 I = 0; I < Count; ++I)
+    {
+        const auto& Mission = *Missions[I];
+        const auto Site = Mission.InspectMission();
+        FAngelIOValue Floor, Trips;
+        const bool bMoving = I % 3 == 1, bArrived = I % 3 == 2;
+        if (!Mission.GetOutput(TEXT("LastFloor"), Floor) || Floor.Integer != (bArrived ? Count + I : I + 1) ||
+            !Mission.GetOutput(TEXT("TotalTrips"), Trips) || Trips.Integer != (bArrived ? 1 : 0) ||
+            Site.State != EAngelIOState::Waiting || Site.Waiting != (bMoving ? TEXT("MotionFinished") : TEXT("RequestFloor")) ||
+            Site.Script != TEXT("Elevator.as") || Site.Line != (bMoving ? 25 : 18) || !Site.Instance.IsValid())
+        {
+            AddError(FString::Printf(TEXT("Mission %d has incorrect globals, wait or source location"), I));
+            return false;
+        }
+        Instances.Add(Site.Instance);
+    }
+    Missions.Reset();
+    return TestEqual(TEXT("Distinct mission IDs"), Instances.Num(), Count) &&
+        TestFalse(TEXT("Releasing the final mission releases its registered engine"), Lifetime.IsValid());
 }
 #endif
