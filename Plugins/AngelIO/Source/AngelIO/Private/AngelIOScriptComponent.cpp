@@ -8,10 +8,6 @@
 #include "Net/UnrealNetwork.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-#include "Misc/ScopeExit.h"
-#include "Tests/AngelIOStartupProbe.h"
-#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogAngelIO, Log, All);
 
@@ -93,13 +89,6 @@ void UAngelIOScriptComponent::ReceiveNamedInput(const FString& Name, int32 Value
 bool UAngelIOScriptComponent::StartScript()
 {
     if (!CanRunMission()) return false;
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-    const auto WorldProbe = FAngelIOStartupProbe::WorldCapture(GetWorld());
-    auto*& Active = FAngelIOStartupProbe::Current();
-    TGuardValue<FAngelIOStartupProbe*> Capture(Active, WorldProbe ? WorldProbe.Get() : Active);
-    const uint64 Begin = WorldProbe ? FPlatformTime::Cycles64() : 0;
-    ON_SCOPE_EXIT { if (WorldProbe) WorldProbe->ComponentCycles += FPlatformTime::Cycles64() - Begin; };
-#endif
     Pending.Reset();
     ReleaseProgram();
     Program = MakeShared<FAngelIOProgram>();

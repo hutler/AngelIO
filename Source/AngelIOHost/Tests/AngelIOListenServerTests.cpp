@@ -4,6 +4,7 @@
 #include "../AngelIOLiftTrip.h"
 #include "../AngelIOPlayerController.h"
 #include "AngelIOScriptAPI.h"
+#include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOTraceSubsystem.h"
@@ -74,7 +75,7 @@ struct FListenPeers
 };
 TUniquePtr<TGuardValue<FString>> ListenPlayURL;
 
-void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"), const FString& Slot = FString())
+void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"), const FString& Slot = FString(), const FString& Options = {})
 {
     auto* Settings = NewObject<ULevelEditorPlaySettings>();
     Settings->SetPlayNetMode(EPlayNetMode::PIE_ListenServer);
@@ -86,7 +87,7 @@ void StartListenSession(const TCHAR* Map = TEXT("/Game/Demo/TwoLifts"), const FS
     Params.EditorPlaySettings = Settings;
     Params.GlobalMapOverride = Map;
     Params.bAllowOnlineSubsystem = false;
-    ListenPlayURL = MakeUnique<TGuardValue<FString>>(GEditor->UserEditedPlayWorldURL, FString(Map) + TEXT("?AngelIOCheckpointSlot=") + Slot);
+    ListenPlayURL = MakeUnique<TGuardValue<FString>>(GEditor->UserEditedPlayWorldURL, FString(Map) + TEXT("?AngelIOCheckpointSlot=") + Slot + Options);
     GEditor->RequestPlaySession(Params);
 }
 
@@ -497,37 +498,37 @@ IMPLEMENT_COMPLEX_AUTOMATION_TEST(FAngelIOStreamedBytecode, "AngelIO.Network.Lis
 
 void FAngelIOStreamedBytecode::GetTests(TArray<FString>& Names, TArray<FString>& Commands) const
 {
-    Names.Append({TEXT("Source"), TEXT("OneEntry"), TEXT("ThreeEntries")});
-    Commands.Append({TEXT("0"), TEXT("1"), TEXT("3")});
+    Names.Append({TEXT("Disabled"), TEXT("Eviction"), TEXT("Fits")});
+    Commands.Append({TEXT("0"), TEXT("3"), TEXT("32")});
 }
 
 bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
 {
     if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
-    const int32 Capacity = FCString::Atoi(*Parameter);
+    const int32 BudgetKiB = FCString::Atoi(*Parameter);
     struct FRoom
     {
         TWeakObjectPtr<ULevelStreamingDynamic> Host, Client;
-        TWeakPtr<FAngelIOStartupProbe> Probe;
-        int32 PersistentModules = 0, Builds = 0, Loads = 0, Evictions = 0;
-        uint64 ComponentCycles = 0, Heap = 0;
-        int64 Payload = 0;
-        double RequestTime = 0;
+        TWeakPtr<FAngelIORegisteredEngine> Engine;
+        int32 PersistentModules = 0;
+        FAngelIOBytecodeCacheStats Before;
         FGuid FirstMission;
     };
     const auto Room = MakeShared<FRoom>();
-    StartListenSession(TEXT("/Engine/Maps/Entry"));
+    StartListenSession(TEXT("/Engine/Maps/Entry"), {}, FString::Printf(TEXT("?AngelIOBytecodeCacheKiB=%d"), BudgetKiB));
     const auto Steps = ListenSteps(this);
-    Steps(TEXT("start a cold room capture after the remote player joins"), [this, Room, Capacity]
+    Steps(TEXT("read the runtime cache after the remote player joins"), [this, Room, BudgetKiB]
     {
         auto* Host = FindPeer(NM_ListenServer);
         auto* Client = FindPeer(NM_Client);
         auto* PC = Client ? Cast<AAngelIOPlayerController>(Client->GetFirstPlayerController()) : nullptr;
         if (!Host || !PC || !PC->GetNetConnection() || PC->TripPanel->GetWaitingSignal() != TEXT("CallLift")) return false;
-        Room->Probe = FAngelIOStartupProbe::EnableWorldCapture(Host, Capacity);
-        if (!TestTrue(TEXT("Fresh capture on the authority world"), Room->Probe.IsValid())) return true;
+        auto Stats = AngelIO::GetBytecodeCacheStats(Host);
+        if (!TestTrue(TEXT("Host has a runtime cache"), Stats.IsSet()) ||
+            !TestEqual(TEXT("Travel URL selects this world's budget"), Stats->BudgetBytes, uint64(BudgetKiB) * 1024)) return true;
+        Room->Before = *Stats;
+        Room->Engine = FAngelIOStartupProbe::WorldEngine(Host);
         Room->PersistentModules = FAngelIOStartupProbe::WorldModuleCount(Host);
-        Room->RequestTime = FPlatformTime::Seconds();
         Room->Host = LoadLiftRoom(Host, false);
         Room->Client = LoadLiftRoom(Client, false);
         TestTrue(TEXT("Requested a hidden room on both peers"), Room->Host.IsValid() && Room->Client.IsValid());
@@ -540,13 +541,12 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             Steps(TEXT("verify full unload and retained cache before re-entry"), [this, Room]
             {
                 if (Room->Host->GetLoadedLevel() || Room->Client->GetLoadedLevel()) return false;
-                const auto Probe = Room->Probe.Pin();
-                if (!TestTrue(TEXT("World capture survives room unload"), Probe.IsValid())) return true;
+                auto Stats = AngelIO::GetBytecodeCacheStats(Room->Host->GetWorld());
+                if (!TestTrue(TEXT("World engine survives room unload"), Stats.IsSet())) return true;
                 TestEqual(TEXT("Only persistent modules survive unload"),
                     FAngelIOStartupProbe::WorldModuleCount(Room->Host->GetWorld()), Room->PersistentModules);
-                TestEqual(TEXT("Heap retained across unload"), Probe->CacheHeapBytes(), Room->Heap);
-                TestEqual(TEXT("Bytecode retained across unload"), Probe->PayloadBytes(), Room->Payload);
-                Room->RequestTime = FPlatformTime::Seconds();
+                TestEqual(TEXT("Heap retained across unload"), Stats->RetainedBytes, Room->Before.RetainedBytes);
+                TestEqual(TEXT("No entries lost during unload"), Stats->Entries, Room->Before.Entries);
                 Room->Host->SetShouldBeLoaded(true);
                 Room->Client->SetShouldBeLoaded(true);
                 return true;
@@ -565,41 +565,32 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             Room->Client->SetShouldBeVisible(true);
             return true;
         });
-        Steps(TEXT("measure the four visible room missions"), [this, Room, Capacity, bReload]
+        Steps(TEXT("measure the four visible room missions"), [this, Room, BudgetKiB, bReload]
         {
             if (!Room->Host->IsLevelVisible() || !Room->Client->IsLevelVisible()) return false;
-            const double VisibleMs = (FPlatformTime::Seconds() - Room->RequestTime) * 1000.0;
-            const auto Probe = Room->Probe.Pin();
-            if (!TestTrue(TEXT("World capture is available at room startup"), Probe.IsValid())) return true;
-            const int32 Hits = Probe->Loads - Room->Loads, Misses = Probe->Builds - Room->Builds;
-            const uint64 Heap = Probe->CacheHeapBytes();
-            const int64 Payload = Probe->PayloadBytes();
-            TestEqual(TEXT("Four room starts per visit"), Hits + Misses, 4);
+            auto Stats = AngelIO::GetBytecodeCacheStats(Room->Host->GetWorld());
+            if (!TestTrue(TEXT("Host runtime stats are available"), Stats.IsSet())) return true;
+            const uint64 Hits = Stats->Hits - Room->Before.Hits, Builds = Stats->SourceBuilds - Room->Before.SourceBuilds;
+            const uint64 Evictions = Stats->Evictions - Room->Before.Evictions;
+            TestEqual(TEXT("Four room starts per visit"), Hits + Builds, uint64(4));
             TestEqual(TEXT("Four fresh room modules"), FAngelIOStartupProbe::WorldModuleCount(Room->Host->GetWorld()), Room->PersistentModules + 4);
-            TestEqual(TEXT("Cache fills to the configured limit"), Probe->CacheEntries(), Capacity);
-            TestFalse(TEXT("Client has no bytecode capture"), FAngelIOStartupProbe::WorldCapture(Room->Client->GetWorld()).IsValid());
-            TestFalse(TEXT("Client has no VM"), FAngelIOStartupProbe::WorldEngine(Room->Client->GetWorld()).IsValid());
-            if (Capacity == 3)
+            TestFalse(TEXT("No cache or VM on the client"), AngelIO::GetBytecodeCacheStats(Room->Client->GetWorld()).IsSet());
+            TestTrue(TEXT("All retained allocations fit in the world budget"), Stats->RetainedBytes <= Stats->BudgetBytes);
+            if (BudgetKiB == 32)
             {
-                TestEqual(TEXT("One cold build per script and all hits on re-entry"), Hits, bReload ? 4 : 1);
-                TestEqual(TEXT("The working set fits"), Probe->Evictions, 0);
-                if (bReload) TestEqual(TEXT("Loading resident entries retained no extra memory"), Heap, Room->Heap);
+                TestEqual(TEXT("Working set produces the expected hits"), Hits, bReload ? uint64(4) : uint64(1));
+                TestEqual(TEXT("All room entries fit"), Evictions, uint64(0));
+                if (bReload) TestEqual(TEXT("All hits use existing storage"), Stats->RetainedBytes, Room->Before.RetainedBytes);
             }
-            else if (Capacity == 1)
-                TestTrue(TEXT("A single entry evicts room scripts"), Probe->Evictions - Room->Evictions >= 2);
+            else if (BudgetKiB)
+                TestTrue(TEXT("Pressure evicts and rebuilds, while admitting each room script"),
+                    Evictions > 0 && Builds > 0 && Stats->Oversized == Room->Before.Oversized && Stats->RetainedBytes > 0);
             else
-                TestEqual(TEXT("Uncached source builds on every start"), Misses, 4);
-            TestTrue(TEXT("Heap accounts for payload and storage"), Capacity ? Payload > 0 && Heap > uint64(Payload) : Heap == 0 && Payload == 0);
-            AddInfo(FString::Printf(TEXT("AngelIO room_cache phase=%s capacity=%d hits=%d misses=%d evictions=%d entries=%d ")
-                TEXT("payload_bytes=%lld heap_bytes=%llu component_ms=%.3f request_to_visible_ms=%.3f"),
-                bReload ? TEXT("reload") : TEXT("first"), Capacity, Hits, Misses, Probe->Evictions - Room->Evictions,
-                Probe->CacheEntries(), Payload, Heap, FPlatformTime::ToMilliseconds64(Probe->ComponentCycles - Room->ComponentCycles), VisibleMs));
-            Room->Builds = Probe->Builds;
-            Room->Loads = Probe->Loads;
-            Room->Evictions = Probe->Evictions;
-            Room->ComponentCycles = Probe->ComponentCycles;
-            Room->Heap = Heap;
-            Room->Payload = Payload;
+                TestTrue(TEXT("Zero budget compiles all four and retains nothing"), Builds == 4 && !Stats->RetainedBytes && !Stats->Entries);
+            AddInfo(FString::Printf(TEXT("AngelIO runtime_cache phase=%s budget_bytes=%llu hits=%llu builds=%llu evictions=%llu oversized=%llu entries=%d retained_bytes=%llu"),
+                bReload ? TEXT("reload") : TEXT("first"), Stats->BudgetBytes, Hits, Builds, Evictions,
+                Stats->Oversized - Room->Before.Oversized, Stats->Entries, Stats->RetainedBytes));
+            Room->Before = *Stats;
             return true;
         });
         Steps(TEXT("client receives both lift floors and both panel waits"), [this, Room, bReload]
@@ -610,7 +601,10 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             auto* Delivery = DeliveryPanel(Room->Client.Get(), 3);
             if (!Blink || !Delivery || Blink->GetWaitingSignal() != TEXT("Dispatch") || Delivery->GetWaitingSignal() != TEXT("Dispatch") ||
                 !TripOutput(Blink, TEXT("Pulses"), 0) || !TripOutput(Delivery, TEXT("Stage"), 0)) return false;
-            const FGuid Instance = DeliveryPanel(Room->Host.Get())->InspectMission().Instance;
+            const auto Site = DeliveryPanel(Room->Host.Get())->InspectMission();
+            TestEqual(TEXT("Delivery wait keeps its source section"), Site.Script, FString(TEXT("Examples/RoomDelivery.as")));
+            TestEqual(TEXT("Delivery wait keeps its debug line"), Site.Line, 9);
+            const FGuid Instance = Site.Instance;
             TestTrue(TEXT("New mission context on each visit"), Instance.IsValid() && Instance != Room->FirstMission);
             if (!bReload)
             {
@@ -627,7 +621,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
     EndListenSession();
     ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Room]
     {
-        TestFalse(TEXT("World teardown releases retained cache storage"), Room->Probe.IsValid());
+        TestFalse(TEXT("World teardown releases the engine that owns the cache"), Room->Engine.IsValid());
         return true;
     }));
     return true;

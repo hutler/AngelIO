@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Subsystems/WorldSubsystem.h"
+#include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptWorldSubsystem.generated.h"
 
 class FAngelIOProgram;
@@ -21,10 +22,8 @@ public:
 private:
     friend class FAngelIOProgram;
     friend struct FAngelIOStartupProbe;
+    friend TOptional<FAngelIOBytecodeCacheStats> AngelIO::GetBytecodeCacheStats(UWorld*);
     TSharedPtr<FAngelIORegisteredEngine> RegisteredEngine;
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-    TSharedPtr<struct FAngelIOStartupProbe> StartupProbe;
-#endif
     TSet<FAngelIOProgram*> Programs;
     bool bRegistering = false;
     bool bClosing = false;

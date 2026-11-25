@@ -1,4 +1,5 @@
 #include "AngelIOProgram.h"
+#include "AngelIOBytecodeCache.h"
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOScriptAPI.h"
 #include "AngelIOScriptComponent.h"
@@ -255,11 +256,12 @@ struct FAngelIOModuleBindings
 struct FAngelIORegisteredEngine
 {
     asIScriptEngine* Engine;
+    FAngelIOBytecodeCache Cache;
     FAngelIOModuleBindings Bindings;
     TArray<FString> Declarations;
     uint64 NextModule = 0;
 
-    explicit FAngelIORegisteredEngine(asIScriptEngine* InEngine) : Engine(InEngine) {}
+    FAngelIORegisteredEngine(asIScriptEngine* InEngine, UWorld& World) : Engine(InEngine), Cache(World) {}
     ~FAngelIORegisteredEngine() { Engine->ShutDownAndRelease(); }
 };
 
@@ -268,27 +270,17 @@ void UAngelIOScriptWorldSubsystem::Deinitialize()
     bClosing = true;
     while (!Programs.IsEmpty()) (*Programs.CreateConstIterator())->EndWorld();
     RegisteredEngine.Reset();
-#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-    StartupProbe.Reset();
-#endif
     Super::Deinitialize();
 }
 
+TOptional<FAngelIOBytecodeCacheStats> AngelIO::GetBytecodeCacheStats(UWorld* World)
+{
+    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
+    if (!Owner || !Owner->RegisteredEngine || Owner->bClosing) return {};
+    return Owner->RegisteredEngine->Cache.Stats;
+}
+
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-TWeakPtr<FAngelIOStartupProbe> FAngelIOStartupProbe::EnableWorldCapture(UWorld* World, int32 Capacity)
-{
-    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
-    if (!Owner || Owner->bClosing || World->GetNetMode() == NM_Client || Capacity < 0 || Owner->StartupProbe) return {};
-    Owner->StartupProbe = MakeShared<FAngelIOStartupProbe>(Capacity);
-    return Owner->StartupProbe;
-}
-
-TSharedPtr<FAngelIOStartupProbe> FAngelIOStartupProbe::WorldCapture(UWorld* World)
-{
-    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
-    return Owner ? Owner->StartupProbe : nullptr;
-}
-
 TWeakPtr<FAngelIORegisteredEngine> FAngelIOStartupProbe::WorldEngine(UWorld* World)
 {
     auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
@@ -307,6 +299,7 @@ struct FAngelIOProgram::FImpl
     asIScriptEngine* Engine = nullptr;
     TSharedPtr<FAngelIORegisteredEngine> SharedEngine;
     bool PrepareWorldModule(UAngelIOScriptWorldSubsystem& Owner, FAngelIOModuleBindings& Bindings);
+    bool CreateWorldModule();
     bool RegisterAPI(FAngelIOModuleBindings& Bindings);
     asIScriptModule* Module = nullptr;
     asIScriptContext* Context = nullptr;
@@ -947,7 +940,7 @@ bool FAngelIOProgram::FImpl::PrepareWorldModule(UAngelIOScriptWorldSubsystem& Ow
         TGuardValue<bool> Guard(Owner.bRegistering, true);
         if (!RegisterAPI(Bindings)) return false;
         if (Owner.bClosing) return Fail(TEXT("Mission world ended during API registration"));
-        SharedEngine = MakeShared<FAngelIORegisteredEngine>(Engine);
+        SharedEngine = MakeShared<FAngelIORegisteredEngine>(Engine, *Owner.GetWorld());
         SharedEngine->Bindings = Bindings;
         SharedEngine->Declarations = ExternalAPI;
         Owner.RegisteredEngine = SharedEngine;
@@ -964,6 +957,11 @@ bool FAngelIOProgram::FImpl::PrepareWorldModule(UAngelIOScriptWorldSubsystem& Ow
         Bindings = SharedEngine->Bindings; // Map validation may remove shadowed names from this copy.
         ANGELIO_BENCHMARK_MARK(ProvidersInspected);
     }
+    return CreateWorldModule();
+}
+
+bool FAngelIOProgram::FImpl::CreateWorldModule()
+{
     const FString Name = FString::Printf(TEXT("mission_%llu"), ++SharedEngine->NextModule);
     Module = Engine->GetModule(TCHAR_TO_UTF8(*Name), asGM_ALWAYS_CREATE);
     return Module || Fail(TEXT("Could not create shared engine mission module"));
@@ -1003,21 +1001,55 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source, UWorl
         WrapperSource += Wrapper.Declaration + TEXT(" { ") + Wrapper.Body + TEXT(" }\n");
         S.ExternalAPI.Add(Wrapper.Declaration);
     }
-    FTCHARToUTF8 WrapperBytes(*WrapperSource);
-    if (WrapperBytes.Length() && S.Module->AddScriptSection("AngelIO API", WrapperBytes.Get(), WrapperBytes.Length()) < 0)
-        return S.Fail(TEXT("Could not register external script wrappers"));
     FTCHARToUTF8 SourceBytes(*Source);
-    S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
-    if (S.Module->AddScriptSection(TCHAR_TO_UTF8(*Label), SourceBytes.Get(), SourceBytes.Length()) < 0 ||
+    auto* Cache = S.SharedEngine ? &S.SharedEngine->Cache : nullptr;
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
-        FAngelIOStartupProbe::Build(*S.Module, World, Label, Source, WrapperSource) < 0 ||
-#else
-        S.Module->Build() < 0 ||
+    // The historical paired benchmarks explicitly select their own source/bytecode path.
+    if (FAngelIOStartupProbe::Current()) Cache = nullptr;
 #endif
-        !S.Inspect())
+    const bool bCacheEnabled = Cache && Cache->Stats.BudgetBytes > 0;
+    FBlake3Hash Revision;
+    bool bLoaded = false;
+    if (bCacheEnabled)
+    {
+        // Native declarations and wrapper bodies are fixed for this registered engine.
+        Revision = FBlake3::HashBuffer(SourceBytes.Get(), SourceBytes.Length());
+        const int32 PriorMessages = S.Messages.Num();
+        const auto Load = Cache->TryLoad(*S.Module, Label, Revision);
+        bLoaded = Load == FAngelIOBytecodeCache::ELoad::Hit;
+        if (Load == FAngelIOBytecodeCache::ELoad::Invalid)
+        {
+            S.Module->Discard();
+            if (!S.CreateWorldModule()) return false;
+            S.Messages.SetNum(PriorMessages);
+        }
+    }
+    if (!bLoaded)
+    {
+        if (Cache) ++Cache->Stats.SourceBuilds;
+        FTCHARToUTF8 WrapperBytes(*WrapperSource);
+        if (WrapperBytes.Length() && S.Module->AddScriptSection("AngelIO API", WrapperBytes.Get(), WrapperBytes.Length()) < 0)
+            return S.Fail(TEXT("Could not register external script wrappers"));
+        S.AddSignalBindings({SourceBytes.Get(), static_cast<size_t>(SourceBytes.Length())});
+        if (S.Module->AddScriptSection(TCHAR_TO_UTF8(*Label), SourceBytes.Get(), SourceBytes.Length()) < 0)
+            return S.Fail(TEXT("Could not add mission source"));
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+        const int Build = FAngelIOStartupProbe::Build(*S.Module, World, Label, Source, WrapperSource);
+#else
+        const int Build = S.Module->Build();
+#endif
+        if (Build < 0) { S.Status = EAngelIOState::Failed; return false; }
+    }
+    if (!S.Inspect())
     {
         S.Status = EAngelIOState::Failed;
         return false;
+    }
+    // Preserve source diagnostics on subsequent compiles of scripts that produced warnings.
+    if (bCacheEnabled && !bLoaded && S.Messages.IsEmpty())
+    {
+        Cache->Store(*S.Module, Label, Revision);
+        S.Messages.Reset(); // An optional serialization failure is not a source diagnostic.
     }
     S.Status = EAngelIOState::Compiled;
 #if WITH_EDITOR

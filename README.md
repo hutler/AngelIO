@@ -153,6 +153,10 @@ Copy [Plugins/AngelIO](Plugins/AngelIO) into a C++ project and enable the plugin
 
 Add `AngelIO` to the dependencies in your module's `Build.cs` to use the component or register script bindings. The plugin ships with the AngelScript 2.39.0 static library for Win64. The rebuild script verifies the SDK archive's SHA-256 and uses MSVC 2022 x64. Other platforms require a library build for that target. [Rebuild script](Tools/BuildAngelScript.ps1) · [AngelScript SDK](https://www.angelcode.com/angelscript/downloads.html)
 
+### Configure the mission bytecode cache
+
+Each authority world caches compiled mission bytecode across room unloads. The default budget is **256 KiB per world**. Set **Project Settings → Plugins → AngelIO → Bytecode Cache Budget (KiB)** or override a single world with `?AngelIOBytecodeCacheKiB=32` in the listen or travel URL. Zero disables the cache. When space runs out the world evicts the least recently used entry. A script larger than the limit still runs from source. [Configuration, runtime counters and listen-server results](Docs/AgentGuide.md#runtime-bytecode-cache)
+
 ### Expose types from a game module
 
 Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)` and register the provider with `IModularFeatures` during `StartupModule`. The first runtime mission in each authority world registers the API. Every mission compiles into a separate module with its own globals, context and waits. Unloading a streamed room releases its modules. Reloading the room reuses the world's registered API. A replacement world registers its own engine on first use. Client replicas read replicated state. [World lifetime and native callers](Docs/AgentGuide.md#world-owned-angelscript-engine)
@@ -259,7 +263,7 @@ Run the `AngelIO.` filter in Unreal Automation for the full regression suite. Th
 | `TypedTrips` | Sends overlapping host and client requests, starts a concurrent ride on a second lift, and verifies each caller's result and the exported event history, including cancellation when a moving lift is destroyed. |
 | `HandleLifetimeAndTimeout` | Reassigns a name while a script holds the original lift. Checks a timed wait, eventual arrival, a client request to the replacement, replication and the stale handle's cancellation reason. |
 | `StreamedTrips` | Loads the two-lift map as a sublevel on both peers, hides it mid-ride, shows the same actor again, then fully unloads and reloads the room. The client sees the new ride arrive. |
-| `StreamedBytecode` | Measures cache hits, retained heap and startup for a streamed room with four missions and three distinct scripts, including a full unload and return. [Results and reproduction](Docs/AgentGuide.md#bytecode-cache-across-room-reloads) |
+| `StreamedBytecode` | Verifies runtime hits and evictions in a streamed four-mission room with 0, 3 and 32 KiB budgets. [Results and reproduction](Docs/AgentGuide.md#runtime-bytecode-cache) |
 | `WaitActor` | Sends client requests before loading and after unloading a room. Checks timeout, readiness after startup motion, replicated floor arrivals and lookup history on the host. |
 | `MissionCheckpoints` | Interrupts and retries a delivery, reloads both committed stages, checks exactly one arrival and verifies the late client's state and a second room's independent progress. |
 | `CheckpointRestart` | Restarts a host and client on the same slot. Both peers see floor 4 and the cab at its measured fourth-floor position. The mission accepts confirmation with zero new trips or delivery calls. |

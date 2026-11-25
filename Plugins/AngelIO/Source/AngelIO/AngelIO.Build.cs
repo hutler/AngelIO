@@ -6,7 +6,7 @@ public class AngelIO : ModuleRules
     public AngelIO(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-        PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine" });
+        PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "DeveloperSettings" });
         PrivateDependencyModuleNames.AddRange(new[] { "Json", "SQLiteCore" });
         string sdk = Path.Combine(ModuleDirectory, "..", "ThirdParty", "AngelScript");
         PublicSystemIncludePaths.Add(Path.Combine(sdk, "include"));

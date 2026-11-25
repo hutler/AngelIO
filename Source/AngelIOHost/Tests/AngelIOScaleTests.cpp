@@ -1,6 +1,8 @@
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 #include "AngelIOScriptComponent.h"
 #include "AngelIOScriptAPI.h"
+#include "AngelIOBytecodeCacheStats.h"
+#include "AngelIOSettings.h"
 #include "Features/IModularFeatures.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -236,6 +238,61 @@ bool FAngelIOWorldOwnership::RunTest(const FString&)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOSharedIsolation, "AngelIO.Missions.SharedRegistrationIsolation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIORuntimeBytecode, "AngelIO.Missions.RuntimeBytecodeBudget",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIORuntimeBytecode::RunTest(const FString&)
+{
+    FTestWorldWrapper Reference, Limited;
+    if (!Reference.CreateTestWorld(EWorldType::Game) || !Limited.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* A = Reference.GetTestWorld();
+    UWorld* B = Limited.GetTestWorld();
+    auto Source = [](int32 Length)
+    {
+        return FString::Printf(TEXT("int out_Value; void Run() { string s = \"%s\"; out_Value = int(s.length()); }"),
+            *FString::ChrN(Length, TEXT('x')));
+    };
+    const FString Body = Source(2048);
+    auto Run = [this](UWorld* World, const TCHAR* Label, const FString& Code, int32 Expected)
+    {
+        FAngelIOProgram Mission;
+        FAngelIOValue Value;
+        return TestTrue(TEXT("Requested source revision executes"), Mission.Compile(Label, Code, World) &&
+            Mission.Start({}) && Mission.GetOutput(TEXT("Value"), Value) && Value.Integer == Expected);
+    };
+    TGuardValue<int32> ProjectBudget(GetMutableDefault<UAngelIOSettings>()->BytecodeCacheBudgetKiB, 64);
+    if (!Run(A, TEXT("A.as"), Body, 2048)) return false;
+    const auto Ref = AngelIO::GetBytecodeCacheStats(A);
+    if (!TestTrue(TEXT("Reference world uses the project budget"), Ref && Ref->BudgetBytes == 64 * 1024 &&
+        Ref->Entries == 1 && Ref->RetainedBytes > 1024)) return false;
+    // Select a budget that holds two equal-size entries, including allocator rounding.
+    const int32 KiB = int32((2 * Ref->RetainedBytes + Ref->RetainedBytes / 2 + 512) / 1024);
+    B->URL.AddOption(*FString::Printf(TEXT("AngelIOBytecodeCacheKiB=%d"), KiB));
+    auto Counts = [&](uint64 Hits, uint64 Builds, uint64 Evictions)
+    {
+        const auto Stats = AngelIO::GetBytecodeCacheStats(B);
+        return TestTrue(TEXT("Expected runtime hit/build/eviction counts within the byte budget"), Stats &&
+            Stats->Hits == Hits && Stats->SourceBuilds == Builds && Stats->Evictions == Evictions &&
+            Stats->RetainedBytes <= Stats->BudgetBytes && Stats->BudgetBytes == uint64(KiB) * 1024);
+    };
+    if (!Run(B, TEXT("A.as"), Body, 2048) || !Run(B, TEXT("B.as"), Body, 2048) ||
+        !Run(B, TEXT("A.as"), Body, 2048) || !Run(B, TEXT("C.as"), Body, 2048) || !Counts(1, 3, 1) ||
+        !Run(B, TEXT("A.as"), Body, 2048) || !Run(B, TEXT("B.as"), Body, 2048) || !Counts(2, 4, 2)) return false;
+    const auto Resident = *AngelIO::GetBytecodeCacheStats(B);
+    const int32 Large = KiB * 2048;
+    if (!Run(B, TEXT("Large.as"), Source(Large), Large) || !Counts(2, 5, 2)) return false;
+    const auto After = *AngelIO::GetBytecodeCacheStats(B);
+    if (!TestTrue(TEXT("Oversized mission preserved the resident entries"),
+        After.Oversized == 1 && After.RetainedBytes == Resident.RetainedBytes && After.Entries == 2)) return false;
+    const FString Edit = Source(2047);
+    if (!Run(B, TEXT("A.as"), Edit, 2047) || !Run(B, TEXT("A.as"), Edit, 2047) || !Counts(3, 6, 2)) return false;
+    FAngelIOProgram Broken;
+    if (!TestFalse(TEXT("Bad edit receives its own compiler failure"), Broken.Compile(TEXT("A.as"), TEXT("void Run("), B)) ||
+        !Run(B, TEXT("A.as"), Edit, 2047) || !Counts(4, 7, 2)) return false;
+    return TestTrue(TEXT("Concurrent world's cache stayed independent"),
+        AngelIO::GetBytecodeCacheStats(A)->SourceBuilds == 1 && AngelIO::GetBytecodeCacheStats(A)->Hits == 0);
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBytecodeIsolation, "AngelIO.Missions.WorldBytecodeIsolation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

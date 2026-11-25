@@ -75,6 +75,31 @@ For native gameplay callers use `Program.CompileFile(Path, World)` or `Program.C
 
 `AngelIO.Network.ListenServer.StreamedTrips` counts calls to a real API provider while a host and client hide, unload and reload a room. It checks module counts, a fresh mission ID and the client's replicated arrival at floor 6. It then uses non-seamless `ServerTravel` to replace the world. The original engine is released, registration runs once in the new host, and the reconnected client requests and observes a ride to floor 4. The client world stays free of script engines. `AngelIO.Missions.WorldEngineOwnership` also exercises two live authority worlds, a rejected registration and a cross-world start.
 
+### Runtime bytecode cache
+
+From 0.8.0 each registered authority world keeps compiled mission bytecode in memory. The default budget is **256 KiB per world**, allocated on demand. Set **Project Settings → Plugins → AngelIO → Bytecode Cache Budget (KiB)** or add this to the game's `Config/DefaultGame.ini`.
+
+```ini
+[/Script/AngelIO.AngelIOSettings]
+BytecodeCacheBudgetKiB=256
+```
+
+Override one host world with a travel URL such as `/Game/Demo/TwoLifts?listen?AngelIOBytecodeCacheKiB=32`. The engine reads its budget when the first mission registers the API. Zero selects source builds with zero retained bytes. A room unload releases the mission instances and keeps the cache available for re-entry. World teardown releases the cache. Client replicas and worldless validation have no world cache.
+
+A hit requires the same case-sensitive source label and BLAKE3 digest of the supplied UTF-8 source. Each cache belongs to one native API registration, which fixes the declarations and generated wrappers. Every hit loads debug bytecode into a fresh mission module with its own globals and waits. Source errors and warnings retain their normal diagnostics. A failed edit preserves the previous valid entry. A hit promotes its entry. On admission the cache evicts the least recently used entries until the new record fits. A mission larger than the budget executes from source and leaves existing entries intact.
+
+On the game thread, include `AngelIOBytecodeCacheStats.h` and call `AngelIO::GetBytecodeCacheStats(World)`. The optional snapshot is available for a registered, live authority engine. Compare `Hits`, `SourceBuilds`, `Evictions` and `Oversized` before and after a visit. `Entries` and `RetainedBytes` describe current occupancy. The budget charges the entry and list links, source label, digest and byte buffer, including allocation slack. Active VM memory, temporary compilation buffers and fixed engine bookkeeping are outside the retained-entry budget.
+
+Run `AngelIO.Network.ListenServer.StreamedBytecode` to exercise the shipping code path in networked PIE. The scenario starts two lift missions and two different panel scripts, unloads the room on both peers and returns to fresh mission instances. In one Win64 run the following counts were observed. Evictions can also remove persistent player-panel entries that existed before the room loaded.
+
+| World budget | First load, hits / builds | Return, hits / builds | Evictions on return |
+| --- | ---: | ---: | ---: |
+| 0 KiB | 0 / 4 | 0 / 4 | 0 |
+| 3 KiB | 0 / 4 | 0 / 4 | 4 |
+| 32 KiB | 1 / 3 | 4 / 0 | 0 |
+
+The test checks both replicated floors, panel waits, the suspended delivery line and the memory bound. `AngelIO.Missions.RuntimeBytecodeBudget` checks the project setting and travel override in two concurrent worlds, LRU promotion, changed source, a failed edit and an oversized mission.
+
 ### Streamed targets
 
 Use `Lift@ lift = WaitActor("FreightLift", 5.0f)` in a persistent mission. Handle `null` on timeout. The lookup uses the authoritative world's registry and waits for one distinct lift to finish startup motion and accept floor requests. Missing or ambiguous names can become ready on a later tick. When both readiness and expiry become visible on the same update, readiness wins. Omitting the timeout waits indefinitely, zero polls, and a negative or non-finite duration raises a script error. Use the replicated panel wait and the inspector to distinguish `WaitActor` from `LiftTrip.Wait`. In `read_trace`, the lookup ends in `Ready`, `TimedOut` or `Cancelled / WaiterDetached`. A resulting `Lift.MoveTo` has its own ID. [Example mission](../Content/AngelIO/Examples/StreamedLift.as)
@@ -204,7 +229,8 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Performance.MissionStartup` | Paired startup measurements for 1000 instances of the same script, with per-phase timings and a bytecode reuse experiment |
 | `AngelIO.Performance.SharedRegistration` | Paired source builds with one registered engine per mission or per batch of 1000 missions |
 | `AngelIO.Performance.WorldBytecode` | Six alternating pairs of 1000 component starts on fresh world engines, compiling from source or reusing debug bytecode |
-| `AngelIO.Network.ListenServer.StreamedBytecode` | Cold and repeat loads of a mixed-script room with a source control and two bounded cache sizes |
+| `AngelIO.Network.ListenServer.StreamedBytecode` | Runtime cache hits, bounded LRU eviction, fresh missions and replicated client state after a full unload and return |
+| `AngelIO.Missions.RuntimeBytecodeBudget` | Per-world settings, LRU order, oversized bypass and source revisions on the runtime path |
 | `AngelIO.Missions.BytecodeCacheRevisions` | Source and wrapper edits rebuild the cached label and a failed edit preserves its last usable revision |
 | `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |
 | `AngelIO.Missions.WorldBytecodeIsolation` | Independent globals, signal delivery and source lines across 1000 instances of one cached script |
@@ -263,7 +289,7 @@ These are arithmetic means in milliseconds per 1000 starts over six paired runs 
 
 On the source path, `CompileFile` accounted for 428.0 ms including file access. The SDK's `Build()` itself accounted for 88.9 ms. Reusing bytecode saved 52.8 ms inside the module step and 58.6 ms end to end (11.6%, with savings of 54.5–63.2 ms across pairs). The largest cost was repeating core and provider registration and collecting declarations, at 225.5 ms. Defer a persistent bytecode cache for this short mission.
 
-To reproduce, use the Unreal Automation command above with `$filter = 'AngelIO.Performance.'`. Each `AngelIO startup pair=` log entry includes the phase timings, build and load counts, and bytecode size. The test checks the waiting state and initial output of every instance and verifies that the first and last retain separate mission IDs and the same valid source line. The bytecode path exists only in editor automation.
+To reproduce, use the Unreal Automation command above with `$filter = 'AngelIO.Performance.'`. Each `AngelIO startup pair=` log entry includes the phase timings, build and load counts, and bytecode size. The test checks the waiting state and initial output of every instance and verifies that the first and last retain separate mission IDs and the same valid source line. This comparison uses an explicit editor benchmark override.
 
 #### Registering the API once for 1000 missions
 
@@ -316,7 +342,7 @@ The v0.7.1 experiment retained one entry per probe and matched the world, source
 
 #### Bytecode cache across room reloads
 
-Run the automation command with `$filter = 'AngelIO.Network.ListenServer.StreamedBytecode'`. Each capacity gets a fresh listen-server PIE session with a connected client. The host starts capturing after the player panels have initialized, with an empty room cache. The test streams `/Game/Demo/TwoLifts` into `/Engine/Maps/Entry`. Its two lifts run `Elevator.as`. Before showing the room, the test assigns `Examples/BlinkPanel.as` and `Examples/RoomDelivery.as` to their panel components. Both peers fully unload the level and load the same configuration again. Each visit starts four new mission modules through normal component `BeginPlay`.
+To reproduce the historical entry-count experiment, check out tag `v0.7.2` and run the automation command with `$filter = 'AngelIO.Network.ListenServer.StreamedBytecode'`. Each capacity gets a fresh listen-server PIE session with a connected client. The host starts capturing after the player panels have initialized, with an empty room cache. The test streams `/Game/Demo/TwoLifts` into `/Engine/Maps/Entry`. Its two lifts run `Elevator.as`. Before showing the room, the test assigns `Examples/BlinkPanel.as` and `Examples/RoomDelivery.as` to their panel components. Both peers fully unload the level and load the same configuration again. Each visit starts four new mission modules through normal component `BeginPlay`.
 
 | Host cache capacity | First visit, hits / starts | Return visit, hits / starts | Debug bytecode (bytes) | Retained cache heap (bytes) |
 | --- | ---: | ---: | ---: | ---: |
