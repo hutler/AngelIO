@@ -71,10 +71,10 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
 {
     check(IsInGameThread());
     OutFile.Reset();
-    const auto Cache = FinalCache.IsSet() ? FinalCache : AngelIO::GetBytecodeCacheStats(GetWorld());
+    const auto Cache = FinalCache.IsSet() ? FinalCache : AngelIO::GetBytecodeCacheSnapshot(GetWorld());
     if (Events.IsEmpty() && !Cache.IsSet()) return false;
     auto Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("schemaVersion"), 4);
+    Root->SetNumberField(TEXT("schemaVersion"), 5);
     Root->SetStringField(TEXT("sessionId"), SessionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Root->SetStringField(TEXT("world"), GetWorld()->GetName());
     Root->SetStringField(TEXT("netMode"), NetMode.IsEmpty() ? TraceNetMode(*GetWorld()) : NetMode);
@@ -86,6 +86,26 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
         JsonCache->SetNumberField(TEXT("retainedBytes"), Cache->RetainedBytes);
         JsonCache->SetNumberField(TEXT("hits"), Cache->Hits);
         JsonCache->SetNumberField(TEXT("evictions"), Cache->Evictions);
+        auto EntryJson = [](const FAngelIOBytecodeCacheEntry& Entry)
+        {
+            auto Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("script"), Entry.Script);
+            Row->SetNumberField(TEXT("retainedBytes"), Entry.RetainedBytes);
+            return Row;
+        };
+        TArray<TSharedPtr<FJsonValue>> Residents, Activity;
+        for (const auto& Entry : Cache->ResidentScripts)
+            Residents.Add(MakeShared<FJsonValueObject>(EntryJson(Entry)));
+        for (const auto& Event : Cache->RecentActivity)
+        {
+            auto Row = EntryJson(Event.Entry);
+            Row->SetNumberField(TEXT("sequence"), Event.Sequence);
+            Row->SetStringField(TEXT("type"), Event.Action == EAngelIOBytecodeCacheAction::Hit ? TEXT("hit") : TEXT("eviction"));
+            Activity.Add(MakeShared<FJsonValueObject>(Row));
+        }
+        JsonCache->SetArrayField(TEXT("residentScripts"), MoveTemp(Residents));
+        JsonCache->SetArrayField(TEXT("recentActivity"), MoveTemp(Activity));
+        JsonCache->SetNumberField(TEXT("droppedActivity"), Cache->DroppedActivity);
         Root->SetObjectField(TEXT("bytecodeCache"), JsonCache);
     }
     else Root->SetField(TEXT("bytecodeCache"), MakeShared<FJsonValueNull>());
@@ -119,7 +139,7 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
 void UAngelIOTraceSubsystem::PreDeinitialize()
 {
     // All world subsystems are still alive here, irrespective of their final teardown order.
-    FinalCache = AngelIO::GetBytecodeCacheStats(GetWorld());
+    FinalCache = AngelIO::GetBytecodeCacheSnapshot(GetWorld());
     Super::PreDeinitialize();
 }
 

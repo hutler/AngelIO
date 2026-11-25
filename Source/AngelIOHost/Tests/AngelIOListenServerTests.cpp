@@ -587,6 +587,44 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
             TestEqual(TEXT("Trace retained heap"), (*Cache)->GetNumberField(TEXT("retainedBytes")), double(Stats->RetainedBytes));
             TestEqual(TEXT("Trace cumulative hits"), (*Cache)->GetNumberField(TEXT("hits")), double(Stats->Hits));
             TestEqual(TEXT("Trace cumulative evictions"), (*Cache)->GetNumberField(TEXT("evictions")), double(Stats->Evictions));
+            const FString Detail = Inspector->BytecodeCacheDetails().ToString();
+            uint64 ResidentBytes = 0;
+            const auto& Residents = (*Cache)->GetArrayField(TEXT("residentScripts"));
+            TestEqual(TEXT("Every resident script has a row"), Residents.Num(), Stats->Entries);
+            for (const auto& Value : Residents)
+            {
+                const auto& Row = Value->AsObject();
+                const FString Script = Row->GetStringField(TEXT("script"));
+                const uint64 Bytes = uint64(Row->GetNumberField(TEXT("retainedBytes")));
+                TestTrue(TEXT("Inspector shows the exported script and charge under resident scripts"),
+                    Detail.Left(Detail.Find(TEXT("Recent cache activity"))).Contains(FString::Printf(TEXT("\n%s  ·  %llu B"), *Script, Bytes)));
+                ResidentBytes += Bytes;
+            }
+            TestEqual(TEXT("Resident rows account for all retained bytes"), ResidentBytes, Stats->RetainedBytes);
+            TArray<FString> VisitScripts;
+            for (const auto& Value : (*Cache)->GetArrayField(TEXT("recentActivity")))
+            {
+                const auto& Row = Value->AsObject();
+                const uint64 Sequence = uint64(Row->GetNumberField(TEXT("sequence")));
+                const FString Script = Row->GetStringField(TEXT("script"));
+                const bool bHit = Row->GetStringField(TEXT("type")) == TEXT("hit");
+                TestTrue(TEXT("Inspector identifies exported hits and victims with their charges"),
+                    Detail.Contains(FString::Printf(TEXT("#%llu  %s  ·  %s  ·  %llu B"), Sequence, bHit ? TEXT("Hit") : TEXT("Evicted"),
+                        *Script, uint64(Row->GetNumberField(TEXT("retainedBytes"))))));
+                if (bReload && Sequence > Room->Before.Hits + Room->Before.Evictions)
+                {
+                    TestEqual(TEXT("Reload activity agrees with the world budget"), bHit, BudgetKiB == 32);
+                    VisitScripts.Add(Script);
+                }
+            }
+            if (bReload)
+            {
+                TArray<FString> ExpectedScripts;
+                if (BudgetKiB) ExpectedScripts = {TEXT("Elevator.as"), TEXT("Elevator.as"), TEXT("Examples/BlinkPanel.as"), TEXT("Examples/RoomDelivery.as")};
+                VisitScripts.Sort();
+                TestEqual(TEXT("Reload attributes all four accesses to the right scripts"),
+                    FString::Join(VisitScripts, TEXT(", ")), FString::Join(ExpectedScripts, TEXT(", ")));
+            }
             AddInfo(FString::Printf(TEXT("Cache trace budget_kib=%d phase=%s file=%s"), BudgetKiB,
                 bReload ? TEXT("reload") : TEXT("first"), *FPaths::GetCleanFilename(Path)));
             const uint64 Hits = Stats->Hits - Room->Before.Hits, Builds = Stats->SourceBuilds - Room->Before.SourceBuilds;
@@ -622,10 +660,13 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
                 !TripOutput(Blink, TEXT("Pulses"), 0) || !TripOutput(Delivery, TEXT("Stage"), 0)) return false;
             const auto Site = DeliveryPanel(Room->Host.Get())->InspectMission();
             const FString HostSummary = Inspector->BytecodeCacheSummary();
+            const FText HostDetails = Inspector->BytecodeCacheDetails();
             Inspector->SelectWorld(Client);
+            TestTrue(TEXT("Unresolved replica has no cache details"), Inspector->BytecodeCacheDetails().IsEmpty());
             TestTrue(TEXT("Unresolved client selection clears the host counters"), Inspector->BytecodeCacheSummary().StartsWith(TEXT("Client world")));
             Inspector->SelectMission(Delivery);
             TestEqual(TEXT("Replicated panel identifies the server cache"), Inspector->BytecodeCacheSummary(), TEXT("Server world · ") + HostSummary);
+            TestTrue(TEXT("Replicated panel resolves the same cache records"), Inspector->BytecodeCacheDetails().EqualTo(HostDetails));
             Inspector->SelectWorld(Room->Host->GetWorld());
             TestEqual(TEXT("Delivery wait keeps its source section"), Site.Script, FString(TEXT("Examples/RoomDelivery.as")));
             TestEqual(TEXT("Delivery wait keeps its debug line"), Site.Line, 9);
@@ -649,6 +690,7 @@ bool FAngelIOStreamedBytecode::RunTest(const FString& Parameter)
         TestFalse(TEXT("World teardown releases the engine that owns the cache"), Room->Engine.IsValid());
         Inspector->Refresh();
         TestTrue(TEXT("PIE shutdown clears the cache display"), Inspector->BytecodeCacheSummary().IsEmpty());
+        TestTrue(TEXT("PIE shutdown clears per-script details"), Inspector->BytecodeCacheDetails().IsEmpty());
         return true;
     }));
     return true;

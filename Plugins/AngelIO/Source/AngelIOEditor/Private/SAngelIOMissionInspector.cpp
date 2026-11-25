@@ -20,6 +20,8 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -203,7 +205,14 @@ void SAngelIOMissionInspector::Construct(const FArguments&)
             [ SNew(SVerticalBox).Visibility_Lambda([this]{return World.IsValid() ? EVisibility::Visible : EVisibility::Collapsed;})
                 + SVerticalBox::Slot().AutoHeight()[Heading(TEXT("World bytecode cache"))]
                 + SVerticalBox::Slot().AutoHeight()
-                [ SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(BytecodeCacheSummary());}) ] ]
+                [ SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(BytecodeCacheSummary());}) ]
+                + SVerticalBox::Slot().AutoHeight()
+                [ SNew(SExpandableArea).InitiallyCollapsed(true).AreaTitle(FText::FromString(TEXT("Scripts and cache activity")))
+                    .Visibility_Lambda([this]{return CacheWorld() ? EVisibility::Visible : EVisibility::Collapsed;})
+                    .BodyContent()
+                    [ SNew(SBox).MaxDesiredHeight(180)
+                        [ SNew(SScrollBox) + SScrollBox::Slot()
+                            [ SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return BytecodeCacheDetails();}) ] ] ] ] ]
             + SVerticalBox::Slot().AutoHeight()[Heading(TEXT("Mission"))]
             + SVerticalBox::Slot().AutoHeight().Padding(0,3,0,8)
             [ SNew(SComboButton).IsEnabled_Lambda([this]{return World.IsValid();}).OnGetMenuContent(this, &SAngelIOMissionInspector::MissionMenu)
@@ -387,21 +396,52 @@ void SAngelIOMissionInspector::Refresh()
     }
 }
 
+UWorld* SAngelIOMissionInspector::CacheWorld() const
+{
+    UWorld* Selected = World.Get();
+    if (Selected && Selected->GetNetMode() == NM_Client)
+        return AuthorityMission.IsValid() ? AuthorityMission->GetWorld() : nullptr;
+    return Selected;
+}
+
 FString SAngelIOMissionInspector::BytecodeCacheSummary() const
 {
-    UWorld* Source = World.Get();
-    if (!Source) return {};
-    const bool bReplica = Source->GetNetMode() == NM_Client;
-    if (bReplica)
-    {
-        if (!AuthorityMission.IsValid()) return TEXT("Client world · select a server world to inspect its cache.");
-        Source = AuthorityMission->GetWorld();
-    }
+    if (!World.IsValid()) return {};
+    UWorld* Source = CacheWorld();
+    if (!Source) return TEXT("Client world · select a server world to inspect its cache.");
     const auto Cache = AngelIO::GetBytecodeCacheStats(Source);
     if (!Cache) return TEXT("Waiting for a registered script engine.");
     return FString::Printf(TEXT("%s%sRetained %llu B / budget %llu B  ·  Hits %llu  ·  Evictions %llu"),
-        bReplica ? TEXT("Server world · ") : TEXT(""), Cache->BudgetBytes == 0 ? TEXT("Disabled · ") : TEXT(""),
+        Source != World.Get() ? TEXT("Server world · ") : TEXT(""), Cache->BudgetBytes == 0 ? TEXT("Disabled · ") : TEXT(""),
         Cache->RetainedBytes, Cache->BudgetBytes, Cache->Hits, Cache->Evictions);
+}
+
+FText SAngelIOMissionInspector::BytecodeCacheDetails()
+{
+    UWorld* Source = CacheWorld();
+    const auto Stats = AngelIO::GetBytecodeCacheStats(Source);
+    if (!Stats) return FText::GetEmpty();
+    if (CacheDetailsWorld == Source && CacheDetailsVersion == Stats->InspectionRevision) return CacheDetailsText;
+    const auto Cache = AngelIO::GetBytecodeCacheSnapshot(Source);
+    if (!Cache) return FText::GetEmpty();
+    FString Text = TEXT("Resident scripts (most recently used first)");
+    for (const auto& Entry : Cache->ResidentScripts)
+        Text.Appendf(TEXT("\n%s  ·  %llu B"), *Entry.Script, Entry.RetainedBytes);
+    if (Cache->ResidentScripts.IsEmpty()) Text += TEXT("\nNone");
+    Text += TEXT("\n\nRecent cache activity (newest first)");
+    for (int32 I = Cache->RecentActivity.Num() - 1; I >= 0; --I)
+    {
+        const auto& Event = Cache->RecentActivity[I];
+        Text.Appendf(TEXT("\n#%llu  %s  ·  %s  ·  %llu B"), Event.Sequence,
+            Event.Action == EAngelIOBytecodeCacheAction::Hit ? TEXT("Hit") : TEXT("Evicted"),
+            *Event.Entry.Script, Event.Entry.RetainedBytes);
+    }
+    if (Cache->RecentActivity.IsEmpty()) Text += TEXT("\nNone");
+    if (Cache->DroppedActivity) Text.Appendf(TEXT("\n%llu earlier records omitted"), Cache->DroppedActivity);
+    CacheDetailsWorld = Source;
+    CacheDetailsVersion = Cache->InspectionRevision;
+    CacheDetailsText = FText::FromString(MoveTemp(Text));
+    return CacheDetailsText;
 }
 
 FString SAngelIOMissionInspector::CheckpointSummary() const

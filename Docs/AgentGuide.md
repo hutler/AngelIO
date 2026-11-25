@@ -92,9 +92,19 @@ On the game thread, include `AngelIOBytecodeCacheStats.h` and call `AngelIO::Get
 
 In **Tools → AngelIO Mission Inspector**, select the listen-server world. **World bytecode cache** shows the live retained bytes, byte budget, hits and evictions even without a selected mission. When the inspector resolves a client replica to its server mission, **Server world** identifies the source of those numbers. Hits and evictions accumulate for the lifetime of that world's engine, including player-panel startup before the room loads.
 
-For the same measurements through MCP, run `AngelIO.ExportTrace` on the host after the first visit and again after re-entry. Call `read_trace` with each export basename and compare `bytecodeCache` for the same `sessionId`. Subtract the first counters from the second to measure the return visit. Both byte fields describe memory at export time. An active engine with a zero budget reports four zeros. A trace from a world without a registered script engine reports `null`. Filters and pagination apply to events, so every page of one export carries the same snapshot.
+For the same measurements through MCP, run `AngelIO.ExportTrace` on the host after the first visit and again after re-entry. Call `read_trace` with each export basename and compare `bytecodeCache` for the same `sessionId`. Subtract the first counters from the second to measure the return visit. Both byte fields describe memory at export time. An active engine with a zero budget reports zero totals and empty detail lists. A trace from a world without a registered script engine reports `null`. Filters and pagination apply to events, so every page of one export carries the same snapshot.
 
-Run `AngelIO.Network.ListenServer.StreamedBytecode` to exercise the shipping code path in networked PIE. The scenario starts two lift missions and two different panel scripts, unloads the room on both peers and returns to fresh mission instances. In one Win64 run the following counts were observed. Evictions can also remove persistent player-panel entries that existed before the room loaded.
+Expand **Scripts and cache activity** in the inspector to identify individual entries. The non-shipping C++ API `AngelIO::GetBytecodeCacheSnapshot(World)` and schema 5 of `read_trace` expose the same details. Script labels are case-sensitive.
+
+| Field in `bytecodeCache` | Meaning |
+| --- | --- |
+| `residentScripts` | Every resident entry, most recently used first. Each row has `script` and `retainedBytes`. These charges sum to the world's `retainedBytes`. A script shared by two lifts occupies one entry. |
+| `recentActivity` | Up to 128 hits and budget evictions, oldest first in JSON and newest first in the inspector. Each record has `sequence`, `type` (`hit` or `eviction`), `script` and `retainedBytes` at the time of the event. An eviction names the script that freed the space. Replacing the previous revision of the same label leaves the eviction count unchanged. |
+| `droppedActivity` | Number of earlier cache records that fell outside the window. The lifetime hit and eviction counters keep counting. Diagnostic history uses separate, non-shipping storage. |
+
+For a reload, take `hits + evictions` from the first export and select records in the second with a higher cache sequence. Both exports must have the same `sessionId`. If the second export's `droppedActivity` exceeds that first sum, part of the interval has expired. Mission event cursors and filters operate independently of this cache sequence.
+
+Run `AngelIO.Network.ListenServer.StreamedBytecode` to exercise the runtime cache in networked PIE. The scenario starts two lift missions and two different panel scripts, unloads the room on both peers and returns to fresh mission instances. In one Win64 run the following counts were observed. Evictions can also remove persistent player-panel entries that existed before the room loaded.
 
 | World budget | First load, hits / builds | Return, hits / builds | Evictions on return |
 | --- | ---: | ---: | ---: |
@@ -148,7 +158,7 @@ From the checkout root run `npm ci --prefix Tools/MCP`. Configure a stdio server
 | `validate_map` | `{"map":"/Game/Demo/TwoLifts"}` | `map`, `valid`, `missionsChecked`, and diagnostics with `code`, `severity`, `message`, `actor`, `component`, `script`, `field`, `line`, `column` |
 | `describe_scene` | `{"map":"/Game/Demo/TwoLifts"}` | Actor and component IDs, owning room, mission path, initial overrides, local target bindings and diagnostics |
 | `write_script` | `script`, `source`, `expectedRevision`, optional `dryRun` | Read the SHA-256 revision from `read_script`. Use null to create a file. Dry-run first, then submit with `dryRun: false`. A stale revision returns `revision_conflict`; a concurrent publisher can return `write_busy`. Re-read before retrying. |
-| `read_trace` | Optional fields are `trace` (export basename), one of `operationId`, `checkpointId`, or `stateId` (hyphenated GUID), `afterSequence` (exclusive, default 0), `limit` (1–200, default 50) | `trace`, `schemaVersion`, `sessionId`, `world`, `netMode`, `droppedEvents`, `events`, `nextAfterSequence`. Schema 4 adds `bytecodeCache` with `budgetBytes`, `retainedBytes`, `hits` and `evictions`, or `null`. Schemas 1–3 omit the field. |
+| `read_trace` | Optional fields are `trace` (export basename), one of `operationId`, `checkpointId`, or `stateId` (hyphenated GUID), `afterSequence` (exclusive, default 0), `limit` (1–200, default 50) | `trace`, `schemaVersion`, `sessionId`, `world`, `netMode`, `droppedEvents`, `events`, `nextAfterSequence`. Schema 4 adds `bytecodeCache` with world totals or `null`. Schema 5 adds per-script residency and activity. Schemas 1–3 omit the field. |
 
 **Editing loop.** Call `list_scripts`, `describe_api`, and `read_script`. Edit the file with the workspace editor, then send its relative path to `validate_script`. A compiler error is a successful tool response with `valid: false`. Read each diagnostic's `severity`, `message`, `line` and `column`. A path or tool execution error sets `isError`. A valid report confirms compilation and public declarations. Use PIE for actor lookup, movement, replication and completion.
 
@@ -252,7 +262,7 @@ The example's `Lift.HasSavedArrival(floor)` checks the last committed landing ag
 
 Pass `--checkpoint-trace <basename>` from the `Checkpoint trace` line in the `MissionCheckpoints` test log to verify checkpoint filtering, pagination, stages, source lines and writer/reader identities.
 
-The three `StreamedBytecode` tests log a pair of export basenames under `Cache trace budget_kib`. For each budget, pass `--cache-visits <first-basename>,<reload-basename>` to the same smoke command. It compares the MCP responses with the host JSON, checks the change in cumulative counters, and reads the snapshot on an empty filtered page.
+The three `StreamedBytecode` tests log a pair of export basenames under `Cache trace budget_kib`. For each budget, pass `--cache-visits <first-basename>,<reload-basename>` to the same smoke command. It compares MCP responses with host JSON, checks the memory charged to each resident script, identifies the hits and eviction victims on return, and reads the same snapshot on an empty filtered page.
 
 ```powershell
 npm ci --prefix Tools/MCP

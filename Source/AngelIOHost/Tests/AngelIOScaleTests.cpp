@@ -290,8 +290,48 @@ bool FAngelIORuntimeBytecode::RunTest(const FString&)
     FAngelIOProgram Broken;
     if (!TestFalse(TEXT("Bad edit receives its own compiler failure"), Broken.Compile(TEXT("A.as"), TEXT("void Run("), B)) ||
         !Run(B, TEXT("A.as"), Edit, 2047) || !Counts(4, 7, 2)) return false;
+    const auto Detail = AngelIO::GetBytecodeCacheSnapshot(B);
+    if (!TestTrue(TEXT("History records only hits and budget evictions"), Detail && Detail->RecentActivity.Num() == 6)) return false;
+    const FString ExpectedLabels[] = {TEXT("A.as"), TEXT("B.as"), TEXT("A.as"), TEXT("C.as"), TEXT("A.as"), TEXT("A.as")};
+    for (int32 I = 0; I < 6; ++I)
+    {
+        const auto& Event = Detail->RecentActivity[I];
+        TestEqual(TEXT("Budget eviction names the victim, including after readmission"), Event.Entry.Script, ExpectedLabels[I]);
+        TestEqual(TEXT("Source replacement and oversized builds add no eviction"), Event.Action == EAngelIOBytecodeCacheAction::Eviction, I == 1 || I == 3);
+    }
     return TestTrue(TEXT("Concurrent world's cache stayed independent"),
         AngelIO::GetBytecodeCacheStats(A)->SourceBuilds == 1 && AngelIO::GetBytecodeCacheStats(A)->Hits == 0);
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOCacheActivityRetention, "AngelIO.Missions.BytecodeCacheActivityRetention",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOCacheActivityRetention::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    UWorld* World = Scene.GetTestWorld();
+    World->URL.AddOption(TEXT("AngelIOBytecodeCacheKiB=32"));
+    const TCHAR* Labels[] = {TEXT("Panel.as"), TEXT("panel.as")};
+    for (int32 I = 0; I < 142; ++I)
+    {
+        FAngelIOProgram Mission;
+        if (!TestTrue(TEXT("Compile both case-sensitive labels"), Mission.Compile(Labels[I % 2], TEXT("void Run() {}"), World))) return false;
+    }
+    const auto Cache = AngelIO::GetBytecodeCacheSnapshot(World);
+    if (!TestTrue(TEXT("Bounded journal retains the newest 128 of 140 hits"),
+        Cache && Cache->Hits == 140 && Cache->RecentActivity.Num() == 128 && Cache->DroppedActivity == 12 &&
+        Cache->ResidentScripts.Num() == 2)) return false;
+    TestTrue(TEXT("Most recently used label keeps its case"), Cache->ResidentScripts[0].Script.Equals(Labels[1], ESearchCase::CaseSensitive));
+    for (int32 I = 0; I < Cache->RecentActivity.Num(); ++I)
+    {
+        const auto& Event = Cache->RecentActivity[I];
+        TestEqual(TEXT("Cache sequence survives ring wrap"), Event.Sequence, uint64(13 + I));
+        TestTrue(TEXT("Hit keeps the exact script and allocation charge"), Event.Action == EAngelIOBytecodeCacheAction::Hit &&
+            Event.Entry.Script.Equals(Labels[I % 2], ESearchCase::CaseSensitive) &&
+            Event.Entry.RetainedBytes == Cache->ResidentScripts[1 - I % 2].RetainedBytes);
+    }
+    return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOBytecodeIsolation, "AngelIO.Missions.WorldBytecodeIsolation",

@@ -129,6 +129,12 @@ const checkpointEvent = z.object({
 const traceFields = { sessionId: guid, world: z.string(), netMode: z.string(), droppedEvents: z.number().int().nonnegative() };
 const counter = z.number().int().nonnegative();
 const bytecodeCache = z.object({ budgetBytes: counter, retainedBytes: counter, hits: counter, evictions: counter });
+const cacheEntry = z.object({ script: z.string(), retainedBytes: z.number().int().positive() });
+const cacheDetails = bytecodeCache.extend({
+  residentScripts: z.array(cacheEntry),
+  recentActivity: z.array(cacheEntry.extend({ sequence: z.number().int().positive(), type: z.enum(["hit", "eviction"]) })),
+  droppedActivity: counter
+});
 const stateEvent = z.object({
   ...eventFields, type: z.enum(["stateSaved", "stateRestored"]), stateId: guid,
   target: z.string(), component: z.string(), field: z.string(), value: z.number().int()
@@ -138,11 +144,12 @@ const traceSchema = z.discriminatedUnion("schemaVersion", [
   z.object({ ...traceFields, schemaVersion: z.literal(1), events: z.array(operationEvent) }),
   z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) }),
   z.object({ ...traceFields, schemaVersion: z.literal(3), events: missionEvents }),
-  z.object({ ...traceFields, schemaVersion: z.literal(4), bytecodeCache: bytecodeCache.nullable(), events: missionEvents })
+  z.object({ ...traceFields, schemaVersion: z.literal(4), bytecodeCache: bytecodeCache.nullable(), events: missionEvents }),
+  z.object({ ...traceFields, schemaVersion: z.literal(5), bytecodeCache: cacheDetails.nullable(), events: missionEvents })
 ]);
 
 server.registerTool("read_trace", {
-  description: "Read exported mission events and the world's bytecode cache snapshot (budgetBytes, retainedBytes, cumulative hits and evictions). Filter rides by operationId, mission stages by checkpointId, or saved and restored lift floors by stateId. Reuse the trace filename when paging.",
+  description: "Read mission events and the world's bytecode cache. Schema 5 lists resident scripts with their retained bytes and recent hits and evictions with script, size and cache sequence. Reuse the trace filename when paging. Operation, checkpoint and state filters apply to mission events.",
   inputSchema: {
     trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
     operationId: guid.optional(),

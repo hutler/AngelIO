@@ -191,6 +191,8 @@ Open **Tools → AngelIO Mission Inspector** in the Unreal Editor. Start the dem
 
 **World bytecode cache** shows retained bytes, the memory budget, total hits and total evictions for the selected server world. You can watch the counters while a room unloads and returns without selecting a mission. A resolved client replica shows the same values under **Server world**.
 
+Expand **Scripts and cache activity** to see the bytes charged to each resident script. The list below it identifies each recent hit and each evicted script, including its size at the time. In MCP, `read_trace` exposes these lists as `bytecodeCache.residentScripts` and `bytecodeCache.recentActivity` in schema 5. To inspect just the return visit, compare exports from the same world session and take the activity records whose cache sequence is newer than the first export.
+
 The mission picker lists scripted components in the selected world, including multiple panels on one controller. It groups missions on the selected Outliner actor when its counterpart is available. Selecting a client replica shows its replicated wait alongside the live server VM when the editor can resolve the replica through the in-process IP NetDriver's NetGUID cache. With an external server or another replication backend the client view shows the replicated wait. Select the authoritative PIE world for full inspection.
 
 The tab reads the world's in-memory trace. The timeline reports when older events have been discarded. Game modules can pass the executing component or actor as the optional `TraceTarget` argument to `FAngelIOOperation` to associate calls with the exact selected target, including after a rename. Debug data stays local to the editor process.
@@ -244,7 +246,7 @@ The local Model Context Protocol (MCP) server uses stdio. It requires Node.js, t
 | `validate_map` | Saved map package, mission count and diagnostics for components, inputs and named targets |
 | `describe_scene` | Saved map actors and mission components by object path, including room-local name bindings and initial inputs |
 | `write_script` | Compiles a proposed source, checks its SHA-256 revision and optionally commits the file. Defaults to a dry run |
-| `read_trace` | World bytecode cache snapshot and mission events, optionally filtered by operation, checkpoint or persisted state ID and paged by sequence number |
+| `read_trace` | Bytecode cache totals, per-script bytes and recent hits and evictions. Mission events can be filtered by operation, checkpoint or persisted state ID and paged by sequence number |
 
 An agent can inspect the API, edit the source file in its working copy, and then call `validate_script`. Validation uses the plugin's headless commandlet. It compiles the code without executing global initializers or `Run`. Module-wide contract errors have line and column zero.
 

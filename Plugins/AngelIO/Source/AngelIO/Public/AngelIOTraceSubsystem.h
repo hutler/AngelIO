@@ -47,6 +47,6 @@ private:
 #endif
     const FGuid SessionId = FGuid::NewGuid();
     FString NetMode;
-    TOptional<FAngelIOBytecodeCacheStats> FinalCache;
+    TOptional<FAngelIOBytecodeCacheSnapshot> FinalCache;
     int64 Total = 0;
 };

@@ -15,6 +15,7 @@ public:
     ELoad TryLoad(asIScriptModule& Module, const FString& Label, const FBlake3Hash& Revision);
     void Store(asIScriptModule& Module, const FString& Label, const FBlake3Hash& Revision);
     FAngelIOBytecodeCacheStats Stats;
+    FAngelIOBytecodeCacheSnapshot Snapshot() const;
 
 private:
     struct FEntry
@@ -28,5 +29,8 @@ private:
     using FNode = FList::TDoubleLinkedListNode;
     FNode* Find(const FString& Label) const;
     void Remove(FNode* Node);
+    void RecordActivity(EAngelIOBytecodeCacheAction Action, const FEntry& Entry);
+    static constexpr int32 ActivityCapacity = 128;
+    TArray<FAngelIOBytecodeCacheActivity> Activity;
     FList Entries; // Most recently used at the head. Removing a node releases all its storage.
 };

@@ -1,10 +1,10 @@
 #pragma once
 
 #include "Subsystems/WorldSubsystem.h"
-#include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptWorldSubsystem.generated.h"
 
 class FAngelIOProgram;
+class FAngelIOBytecodeCache;
 struct FAngelIORegisteredEngine;
 
 // Runtime missions register the API lazily on the authority game thread.
@@ -13,6 +13,7 @@ class UAngelIOScriptWorldSubsystem : public UWorldSubsystem
 {
     GENERATED_BODY()
 public:
+    static const FAngelIOBytecodeCache* FindBytecodeCache(UWorld* World);
     void Deinitialize() override;
     bool DoesSupportWorldType(EWorldType::Type Type) const override
     {
@@ -22,7 +23,6 @@ public:
 private:
     friend class FAngelIOProgram;
     friend struct FAngelIOStartupProbe;
-    friend TOptional<FAngelIOBytecodeCacheStats> AngelIO::GetBytecodeCacheStats(UWorld*);
     TSharedPtr<FAngelIORegisteredEngine> RegisteredEngine;
     TSet<FAngelIOProgram*> Programs;
     bool bRegistering = false;

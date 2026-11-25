@@ -46,12 +46,18 @@ try {
       const reply = await call("read_trace", { trace, limit: 1 });
       assert(!reply.isError, JSON.stringify(reply.content));
       const snapshot = reply.structuredContent;
-      assert.equal(snapshot.schemaVersion, 4);
+      assert([4, 5].includes(snapshot.schemaVersion));
       assert.equal(snapshot.netMode, "listenServer");
       const cache = snapshot.bytecodeCache;
       const exported = JSON.parse(await readFile(path.join(traceDir, trace), "utf8"));
       assert.deepEqual(cache, exported.bytecodeCache);
-      assert.deepEqual(Object.keys(cache).sort(), ["budgetBytes", "evictions", "hits", "retainedBytes"]);
+      if (snapshot.schemaVersion === 5) {
+        assert.equal(cache.residentScripts.reduce((sum, row) => sum + row.retainedBytes, 0), cache.retainedBytes);
+        assert.equal(new Set(cache.residentScripts.map(row => row.script)).size, cache.residentScripts.length);
+        assert.equal(cache.droppedActivity, 0);
+        assert.equal(cache.recentActivity.length, cache.hits + cache.evictions);
+        cache.recentActivity.forEach((row, i) => assert.equal(row.sequence, i + 1));
+      }
       assert(cache.retainedBytes <= cache.budgetBytes);
       assert.equal(Boolean(cache.retainedBytes), Boolean(cache.budgetBytes));
       const empty = await call("read_trace", { trace, operationId: randomUUID(), afterSequence: Number.MAX_SAFE_INTEGER });
@@ -62,12 +68,28 @@ try {
     }
     const [first, reload] = snapshots;
     assert.equal(first.sessionId, reload.sessionId);
+    assert.equal(first.schemaVersion, reload.schemaVersion);
     assert.notEqual(first.trace, reload.trace);
     const before = first.bytecodeCache, after = reload.bytecodeCache;
     assert.equal(after.budgetBytes, before.budgetBytes);
     assert([0, 3072, 32768].includes(after.budgetBytes));
     assert.equal(after.hits - before.hits, after.budgetBytes === 32768 ? 4 : 0);
     assert.equal(after.evictions - before.evictions, after.budgetBytes === 3072 ? 4 : 0);
+    if (reload.schemaVersion === 5) {
+      const reloadActivity = after.recentActivity.filter(row => row.sequence > before.hits + before.evictions);
+      const roomScripts = ["Elevator.as", "Elevator.as", "Examples/BlinkPanel.as", "Examples/RoomDelivery.as"];
+      assert.deepEqual(reloadActivity.map(row => row.script).sort(), after.budgetBytes ? roomScripts : []);
+      if (after.budgetBytes === 3072) {
+        const victim = reloadActivity[0];
+        assert.deepEqual(before.residentScripts, [{ script: victim.script, retainedBytes: victim.retainedBytes }]);
+      }
+      for (const row of reloadActivity) {
+        assert.equal(row.type, after.budgetBytes === 32768 ? "hit" : "eviction");
+        if (row.type === "hit") {
+          assert.equal(row.retainedBytes, after.residentScripts.find(entry => entry.script === row.script).retainedBytes);
+        }
+      }
+    }
     console.log("read_trace verified cache across reload at " + after.budgetBytes + " bytes: " + files.join(", "));
   }
   if (values.trace) {
@@ -81,10 +103,11 @@ try {
     assert.equal(history.droppedEvents, 0);
     const calls = history.events.filter(e => e.type === "call");
     assert.equal(new Set(calls.map(e => e.operationId)).size, 6);
-    for (const schemaVersion of [1, 2, 3, 4]) {
+    for (const schemaVersion of [1, 2, 3, 4, 5]) {
       const { sessionId, world, netMode, droppedEvents } = history;
       const sample = { schemaVersion, sessionId, world, netMode, droppedEvents, events: [calls[0]] };
-      if (schemaVersion === 4) sample.bytecodeCache = null;
+      if (schemaVersion === 4) sample.bytecodeCache = { budgetBytes: 1024, retainedBytes: 900, hits: 1, evictions: 0 };
+      if (schemaVersion === 5) sample.bytecodeCache = null;
       const trace = "00000000-000000-000-" + randomUUID().replaceAll("-", "") + ".json";
       const filename = path.join(traceDir, trace);
       await writeFile(filename, JSON.stringify(sample), { flag: "wx" });
@@ -144,7 +167,7 @@ try {
       return reply.structuredContent;
     };
     const history = await read({ limit: 200 });
-    assert([2, 3, 4].includes(history.schemaVersion));
+    assert([2, 3, 4, 5].includes(history.schemaVersion));
     assert.equal(history.netMode, "listenServer");
     const checkpointId = history.events.find(e => e.type === "checkpointSaved").checkpointId;
     const first = await read({ checkpointId, limit: 2 });
@@ -188,7 +211,7 @@ try {
     const before = await read(writer);
     const after = await read(reader);
     for (const history of [before, after]) {
-      assert([3, 4].includes(history.schemaVersion));
+      assert([3, 4, 5].includes(history.schemaVersion));
       assert.equal(history.netMode, "listenServer");
       assert.equal(history.droppedEvents, 0);
     }

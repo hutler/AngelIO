@@ -30,6 +30,31 @@ void FAngelIOBytecodeCache::Remove(FNode* Node)
     Stats.RetainedBytes -= Node->GetValue().Charge;
     --Stats.Entries;
     Entries.RemoveNode(Node);
+    ++Stats.InspectionRevision;
+}
+
+void FAngelIOBytecodeCache::RecordActivity(EAngelIOBytecodeCacheAction Action, const FEntry& Entry)
+{
+    if constexpr (!UE_BUILD_SHIPPING)
+    {
+        const uint64 Sequence = Stats.Hits + Stats.Evictions;
+        const int32 Index = Activity.Num() < ActivityCapacity ? Activity.AddDefaulted() : int32((Sequence - 1) % ActivityCapacity);
+        Activity[Index] = {Sequence, Action, {Entry.Label, Entry.Charge}};
+    }
+}
+
+FAngelIOBytecodeCacheSnapshot FAngelIOBytecodeCache::Snapshot() const
+{
+    FAngelIOBytecodeCacheSnapshot Result{Stats};
+    Result.ResidentScripts.Reserve(Stats.Entries);
+    for (const auto& Entry : Entries)
+        Result.ResidentScripts.Add({Entry.Label, Entry.Charge});
+    const uint64 Total = Stats.Hits + Stats.Evictions;
+    Result.DroppedActivity = Total - Activity.Num();
+    Result.RecentActivity.Reserve(Activity.Num());
+    for (uint64 I = Result.DroppedActivity; I < Total; ++I)
+        Result.RecentActivity.Add(Activity[I % ActivityCapacity]);
+    return Result;
 }
 
 FAngelIOBytecodeCache::ELoad FAngelIOBytecodeCache::TryLoad(asIScriptModule& Module, const FString& Label,
@@ -49,6 +74,8 @@ FAngelIOBytecodeCache::ELoad FAngelIOBytecodeCache::TryLoad(asIScriptModule& Mod
         Entries.AddHead(Node);
     }
     ++Stats.Hits;
+    ++Stats.InspectionRevision;
+    RecordActivity(EAngelIOBytecodeCacheAction::Hit, Node->GetValue());
     return ELoad::Hit;
 }
 
@@ -77,10 +104,12 @@ void FAngelIOBytecodeCache::Store(asIScriptModule& Module, const FString& Label,
     if (auto* Previous = Find(Label)) Remove(Previous);
     while (Entry.Charge > Stats.BudgetBytes - Stats.RetainedBytes)
     {
-        Remove(Entries.GetTail());
         ++Stats.Evictions;
+        RecordActivity(EAngelIOBytecodeCacheAction::Eviction, Entries.GetTail()->GetValue());
+        Remove(Entries.GetTail());
     }
     Stats.RetainedBytes += Entry.Charge;
     ++Stats.Entries;
     Entries.AddHead(NewNode.Release());
+    ++Stats.InspectionRevision;
 }

@@ -273,11 +273,25 @@ void UAngelIOScriptWorldSubsystem::Deinitialize()
     Super::Deinitialize();
 }
 
+const FAngelIOBytecodeCache* UAngelIOScriptWorldSubsystem::FindBytecodeCache(UWorld* World)
+{
+    const auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
+    return Owner && Owner->RegisteredEngine && !Owner->bClosing ? &Owner->RegisteredEngine->Cache : nullptr;
+}
+
 TOptional<FAngelIOBytecodeCacheStats> AngelIO::GetBytecodeCacheStats(UWorld* World)
 {
-    auto* Owner = World ? World->GetSubsystem<UAngelIOScriptWorldSubsystem>() : nullptr;
-    if (!Owner || !Owner->RegisteredEngine || Owner->bClosing) return {};
-    return Owner->RegisteredEngine->Cache.Stats;
+    if (const auto* Cache = UAngelIOScriptWorldSubsystem::FindBytecodeCache(World)) return Cache->Stats;
+    return {};
+}
+
+TOptional<FAngelIOBytecodeCacheSnapshot> AngelIO::GetBytecodeCacheSnapshot(UWorld* World)
+{
+    if constexpr (!UE_BUILD_SHIPPING)
+    {
+        if (const auto* Cache = UAngelIOScriptWorldSubsystem::FindBytecodeCache(World)) return Cache->Snapshot();
+    }
+    return {};
 }
 
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS

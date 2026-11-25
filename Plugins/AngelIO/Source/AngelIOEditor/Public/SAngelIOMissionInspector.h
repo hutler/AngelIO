@@ -35,12 +35,17 @@ private:
     void UpdateTimeline();
     FString CheckpointSummary() const;
     FString BytecodeCacheSummary() const;
+    UWorld* CacheWorld() const;
+    FText BytecodeCacheDetails();
     FString PersistedStateSummary() const;
     TSharedRef<SWidget> WorldMenu();
     TSharedRef<SWidget> MissionMenu();
     TSharedRef<SWidget> OperationMenu();
 
     TWeakObjectPtr<UWorld> World;
+    TWeakObjectPtr<UWorld> CacheDetailsWorld;
+    uint64 CacheDetailsVersion = 0;
+    FText CacheDetailsText;
     TWeakObjectPtr<UAngelIOScriptComponent> Mission, AuthorityMission;
     FAngelIOMissionInspection Inspection;
     TArray<FOperation> Operations;
