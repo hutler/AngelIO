@@ -105,6 +105,8 @@ On first writable access to a version-zero SQLite slot, AngelIO takes a consiste
 
 `RequireCheckpoint(version)` returns an empty stage for a missing record and fails the mission for incompatible or corrupt data. `LoadCheckpoint` retains its earlier version-mismatch behavior. `RecordOnce("DeliveryCredit")` commits one entitlement and returns its persistent UUID on every replay. A service applying external rewards must use this UUID as its idempotency key. [Migration and interrupted grant test](../Plugins/AngelIO/Source/AngelIO/Private/Tests/AngelIOStoreTests.cpp)
 
+Recovery always starts a fresh VM at `Run`. The delivery example reconstructs waits and native actions from stage, committed landing and action receipt across room reloads and process restarts. VM stack persistence remains a research question for a mission that cannot reconstruct its state this way.
+
 ### Owned tasks and joins
 
 `Task@ t = StartTask(work, argument)` runs a mission function with signature `int work(int)`. It shares mission globals and belongs to the calling task or root mission. Observe `Status`, `Reason`, `Id` and `ParentId`. `TryGetResult(int &out)` succeeds only when the function returned an integer. An owned task's exception becomes a Failed result with a source location. Legacy `Fork` retains its error propagation.
@@ -353,6 +355,23 @@ The 0.13.0 reference run used UE 5.8.4 on Win64, a Ryzen 9 7845HX and 63.2 GiB R
 
 The first SQLite write including schema creation took 25.040 ms. The workload had 256 contexts and a peak of one queued output per component. Live SDK allocation grew by 3,363,070 bytes and process RSS by 3,850,240 bytes. Both deliveries reached the client in 2.112 s, with 4,272 B/s received and 3,296 B/s sent. The benchmark uses fixed mission counts and local disk. Compare future runs on the same machine and use a production game's own workload to set its budgets.
 
+#### Release qualification after task and recipient tracing
+
+The following repeat used the same UE 5.8.4 Win64 host, tests, NullRHI and allocator flag as 0.13.0. Both deliveries reached the connected client in 2.137 s. These are individual runs. Use the target game's frame budget and workload when evaluating a regression.
+
+| Interval in ms | Samples | p50 | p95 | p99 | Max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed world tick | 240 | 0.196 | 3.148 | 3.791 | 4.358 |
+| Synchronous signal fanout | 24 | 6.615 | 8.275 | 9.367 | 9.367 |
+| Deadline to observed resume, game time | 24 | 8.333 | 8.333 | 8.333 | 8.333 |
+| Warm SQLite write | 64 | 4.775 | 5.232 | 12.952 | 12.952 |
+| Listen world tick | 201 | 0.655 | 0.957 | 1.022 | 1.595 |
+| Editor frame interval including host and client | 200 | 8.403 | 18.318 | 21.222 | 22.032 |
+
+The first slot write took 10.638 ms, including schema creation. The run had 256 contexts, a peak of one queued event per component, 3,377,052 additional live SDK bytes and 3,321,856 additional resident process bytes. Client traffic averaged 4,323 B/s received and 3,438 B/s sent. The fanout p95 rose from 6.055 to 8.275 ms with per-recipient history enabled in the editor. The two runs include other intervening changes, so the timing difference cannot isolate the cost of journaling alone.
+
+The current scheduler preserves same-frame signal delivery, independent reader deadlines and teardown ordering. Pure signal waits already sleep until signaled. The most expensive burst in this test explicitly wakes every recipient. A ready queue would still execute those readers. Keep per-component ticking for active native waits for this workload. Revisit scheduling if a game with mostly inactive predicates exceeds its measured frame budget. SQLite commits are synchronous and deserve their own budget.
+
 #### Where startup time goes
 
 `AngelIO.Performance.MissionStartup` starts 1000 actors running `Examples/TimedGate.as` through component registration and `BeginPlay`. Each mission gets its own AngelScript engine, module, globals and execution context. The source cohort builds every module. In the bytecode cohort the first mission builds and saves the module with debug information (471 bytes in this run), then the other 999 load those bytes from memory. Both cohorts read the file, register the same native API and inspect the mission contract on every start.
@@ -450,23 +469,36 @@ Each hit loads saved bytecode into a new module. Each miss builds the source. Th
 
 `heap_bytes` sums the Unreal containers' allocated sizes for entry slots, bytecode buffers, source labels, full source text and generated wrappers, including reserved capacity. The figure covers retained dynamic storage. It excludes the fixed-size probe, allocator bookkeeping, temporary compilation memory and each live VM. Entries use FIFO eviction. A successful edit replaces the old revision of its label. The separate `BytecodeCacheRevisions` test changes both source and wrapper bodies, checks the executed results and verifies recovery from an invalid edit.
 
-#### Packaged landing checks
+#### Packaged delivery and landing checks
 
 To reproduce the packaged checks, set `$engine` to the Unreal installation directory and run from the checkout. The staged games use cooked maps and IoStore. `-SkipZenStore` selects local cooked output for this run.
 
 ```powershell
 $project = (Resolve-Path AngelIO.uproject).Path
 foreach ($config in 'Development', 'Shipping') {
-    $stage = Join-Path $PWD "Saved/AngelIO/Packages/0.7.0/$config"
-    & "$engine/Engine/Build/BatchFiles/RunUAT.bat" BuildCookRun "-project=$project" -target=AngelIOHost -platform=Win64 "-clientconfig=$config" -build -cook -stage -pak -iostore -package '-map=/Game/Demo/TwoLifts+/Game/Tests/PartitionLift' "-stagingdirectory=$stage" -AdditionalCookerOptions=-SkipZenStore -ddc=InstalledNoZenLocalFallback -nop4 -unattended
+    $stage = Join-Path $PWD "Saved/AngelIO/Packages/0.19.1/$config"
+    & "$engine/Engine/Build/BatchFiles/RunUAT.bat" BuildCookRun "-project=$project" -target=AngelIOHost -platform=Win64 "-clientconfig=$config" -build -cook -stage -pak -iostore -package '-map=/Game/Demo/TwoLifts+/Game/Demo/TwoDeliveryRooms+/Game/Demo/DeliveryRoom+/Game/Tests/PartitionLift' "-stagingdirectory=$stage" -AdditionalCookerOptions=-SkipZenStore -ddc=InstalledNoZenLocalFallback -nop4 -unattended
     if ($LASTEXITCODE) { throw "Packaging failed for $config" }
     $game = if ($config -eq 'Shipping') { 'AngelIOHost-Win64-Shipping.exe' } else { 'AngelIOHost.exe' }
+    & "$engine/Engine/Binaries/ThirdParty/Python3/Win64/python.exe" Tools/TestPackagedDelivery.py "$stage/Windows/AngelIO/Binaries/Win64/$game"
+    if ($LASTEXITCODE) { throw "Packaged delivery check failed for $config" }
     & "$engine/Engine/Binaries/ThirdParty/Python3/Win64/python.exe" Tools/TestPackagedLandings.py "$stage/Windows/AngelIO/Binaries/Win64/$game"
     if ($LASTEXITCODE) { throw "Packaged landing check failed for $config" }
 }
 ```
 
-The probe starts each packaged executable with a temporary user directory and opens its SQLite slot read-only. It exits successfully once both lifts commit their expected floors, 2 and 3.
+The delivery probe starts the packaged listen server and a separate loopback client with isolated user directories. The opt-in demo host opens the fixed delivery map through game travel. The test client connects to its loopback port and runs `-AngelIODeliveryProbe=dispatch`. It approaches each terminal and uses the regular player interaction. Both rooms must show an open door, floor 4, one trip and the confirmation wait. The harness verifies the committed stages and landings, terminates both processes, and starts a fresh pair on the same host slot. The second client requires both restored cabins at their actual landing heights with zero new trips, then confirms each delivery. The harness checks for two distinct credits and byte-identical landing records. The separate landing probe launches TwoLifts and verifies floors 2 and 3. Both probes open their temporary SQLite slots read-only after the writer exits. This avoids a live read racing journal cleanup on Windows.
+
+#### Verified release scope
+
+| Environment on Win64, UE 5.8.4 | Observed behavior |
+| --- | --- |
+| Development Editor, listen host and client | Independent copies of one delivery script, room unload and reload, waiting at the correct source line, scoped lookup failure and successful retry. |
+| Late PIE client | Both rooms replicated their open doors, floor 4 and confirmation waits, including the restored room with zero new trips. |
+| Two independent editor processes | After the host committed the landing before the mission saved Delivered, the next host waited for Confirm with zero replayed MoveTo or Arrived events. |
+| Cooked Development and Shipping, separate host and client processes | Two deliveries reached floor 4. After host termination and relaunch in the same slot, the new client saw both restored cabins with zero new trips and confirmed one credit per room. The original landing records survived byte-for-byte. The standalone TwoLifts game also persisted floors 2 and 3. |
+
+These checks exercise local disk and loopback networking on the development workstation. Production hardware, long-haul traffic and a dedicated server require their own measurements.
 
 ### Diagnose a failed check
 

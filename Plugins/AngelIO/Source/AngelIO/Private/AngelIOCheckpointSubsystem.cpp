@@ -129,7 +129,9 @@ bool UAngelIOCheckpointSubsystem::Open(FString& Error, bool bInspectOnly)
     }
     if (Schema < 0 || Schema > 1)
     {
-        Error = FString::Printf(TEXT("Unsupported or unreadable checkpoint database schema %d"), Schema);
+        Error = Schema < 0
+            ? FString::Printf(TEXT("Could not read checkpoint store schema at %s: %s"), *Path, *Database.GetLastError())
+            : FString::Printf(TEXT("Unsupported checkpoint store schema %d at %s"), Schema, *Path);
         Database.Close();
         return false;
     }

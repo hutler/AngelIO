@@ -228,6 +228,8 @@ The tab reads the world's in-memory trace. The timeline reports when older event
 | `stateSaved` | A native component committed a value. For a lift, `field` is `floor` and `value` is the floor reached. |
 | `stateRestored` | The component applied a saved value. Its `stateId` matches the same record in the previous host's export. |
 
+In the mission inspector, **Open running source** goes to the suspended line even after a source edit. **Validate and restart** checks the working file and configured inputs before replacing the selected authority mission. For a terminal waiting on `Retry`, select the failed `FindDoor` lookup in its operation history to see the original line, scope and reason. Trace schema 6 adds `runId`, `taskId` and `signalId` filters in MCP. The same signal ID connects the sender to its recipients.
+
 Each JSON snapshot includes a schema version, session ID, world and net mode. Events carry a sequence number and world time in seconds. Operation events carry an `operationId`. Checkpoint events share a `checkpointId` for the same room, component and script across reloads. A non-shipping authoritative game world retains its most recent 4096 events. `droppedEvents` counts older entries, so the beginning of a long ride can fall outside the captured window. PIE automatically exports worlds with recorded events or a registered mission engine. Schema 4 includes a world-level `bytecodeCache` snapshot. Compare the exports before and after a room reload to measure changes in `hits` and `evictions`. `retainedBytes` and `budgetBytes` are byte counts at export time. Operation history starts when a native operation is created. A request discarded by a controller before `MoveTo` has no trip ID.
 
 ## MCP tools for editors and agents

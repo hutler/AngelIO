@@ -243,11 +243,24 @@ namespace
     }
 }
 
+FDelegateHandle StartAngelIOPackagedProbe();
+
 class FAngelIOHostModule : public FDefaultGameModuleImpl, public IAngelIOScriptAPI
 {
 public:
-    void StartupModule() override { IModularFeatures::Get().RegisterModularFeature(FeatureName(), this); }
-    void ShutdownModule() override { IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this); }
+    void StartupModule() override
+    {
+        IModularFeatures::Get().RegisterModularFeature(FeatureName(), this);
+        PackagedProbe = StartAngelIOPackagedProbe();
+    }
+    void ShutdownModule() override
+    {
+        FWorldDelegates::OnWorldTickStart.Remove(PackagedProbe);
+        IModularFeatures::Get().UnregisterModularFeature(FeatureName(), this);
+    }
+private:
+    FDelegateHandle PackagedProbe;
+public:
     bool SupportsDynamicReloading() override { return false; }
     void GetScriptWrappers(TArray<FAngelIOScriptWrapper>& Out) const override
     {

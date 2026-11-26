@@ -4,6 +4,7 @@ Saved/
 DerivedDataCache/
 .vs/
 node_modules/
+/Tools/__pycache__/
 *.sln
 Build/Windows/FileOpenOrder/
 
