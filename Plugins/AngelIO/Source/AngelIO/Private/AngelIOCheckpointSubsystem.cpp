@@ -268,17 +268,22 @@ bool UAngelIOCheckpointSubsystem::SaveState(const UActorComponent& Component, co
 }
 
 bool UAngelIOCheckpointSubsystem::RecordOnce(const UActorComponent& Component, const FString& Script, const FString& Action,
-    FGuid& Receipt, FString& Error)
+    FGuid& Receipt, FString& Error, bool* Created)
 {
     if (!Open(Error, false)) return false;
     FKey Key;
     if (!ResolveKey(Component, Script, true, false, Key, Error)) return false;
     auto Write = Database.PrepareStatement(TEXT("INSERT INTO action_receipts(map,owner,contract,action,version,id) ")
         TEXT("VALUES(?1,?2,?3,?4,1,?5) ON CONFLICT(map,owner,contract,action) DO UPDATE SET id=id RETURNING version,id"));
+    const FGuid Proposed = FGuid::NewGuid();
     int32 Version = 0;
-    if (Key.Bind(Write) && Write.SetBindingValueByIndex(4, Action) && Write.SetBindingValueByIndex(5, FGuid::NewGuid()) &&
+    if (Key.Bind(Write) && Write.SetBindingValueByIndex(4, Action) && Write.SetBindingValueByIndex(5, Proposed) &&
         Write.Step() == ESQLitePreparedStatementStepResult::Row && Write.GetColumnValueByIndex(0, Version) && Version == 1 &&
-        Write.GetColumnValueByIndex(1, Receipt) && Receipt.IsValid() && Write.Step() == ESQLitePreparedStatementStepResult::Done) return true;
+        Write.GetColumnValueByIndex(1, Receipt) && Receipt.IsValid() && Write.Step() == ESQLitePreparedStatementStepResult::Done)
+    {
+        if (Created) *Created = Receipt == Proposed;
+        return true;
+    }
     Error = TEXT("Invalid or incompatible action receipt: ") + Action + TEXT(" ") + Database.GetLastError();
     return false;
 }

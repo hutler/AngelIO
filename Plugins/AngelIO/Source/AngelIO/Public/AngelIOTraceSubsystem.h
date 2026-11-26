@@ -18,6 +18,11 @@ public:
     virtual void PreDeinitialize() override;
     virtual void Deinitialize() override;
     bool Export(FString& OutFile) const;
+    // Related rows share the returned signal ID. Native senders can supply their actor as the caller.
+    FGuid SignalSent(const FString& Signal, int32 Value, const FString& Target, int32 Count, TSharedPtr<FJsonObject> Caller);
+    void SignalRecipient(FGuid SignalId, const FString& Component, FGuid Instance, const FString& Outcome);
+    void RecordDecision(const FString& Operation, const FString& Target, const FString& Reason,
+        TSharedRef<FJsonObject> Caller, const UObject* Subject, TSharedPtr<FJsonObject> Arguments = nullptr);
     void RecordCheckpoint(bool bSaved, const FGuid& CheckpointId, const FString& Stage, int32 Version,
         const FGuid& SavedBy, TSharedRef<FJsonObject> Caller);
 #if WITH_EDITOR

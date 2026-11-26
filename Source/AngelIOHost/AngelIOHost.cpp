@@ -6,6 +6,8 @@
 #include "AngelIOTargetRegistry.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
+#include "AngelIOTraceSubsystem.h"
+#include "Dom/JsonObject.h"
 #include "Features/IModularFeatures.h"
 #include <string>
 
@@ -129,8 +131,29 @@ namespace
 
     void FindDoor(asIScriptGeneric* Call)
     {
-        const auto Lookup = ActorLookup(ReadName(Call));
-        auto* Door = ResolveActor<AAngelIORoomDoor>(AngelIO::GetScriptWorld(), Lookup);
+        const FString Role = ReadName(Call);
+        const auto Lookup = ActorLookup(Role);
+        auto* World = AngelIO::GetScriptWorld();
+        auto* Door = ResolveActor<AAngelIORoomDoor>(World, Lookup);
+        if (auto* Trace = !Door && World ? World->GetSubsystem<UAngelIOTraceSubsystem>() : nullptr)
+        {
+            TSet<AActor*> Candidates;
+            int32 Matching = 0;
+            for (auto* Endpoint : World->GetSubsystem<UAngelIOTargetRegistry>()->FindTargets(FName(*Lookup.Name, FNAME_Find)))
+                if (auto* Owner = Endpoint->GetOwner(); IsValid(Owner) && (!Lookup.bLocal || Owner->GetLevel() == Lookup.Room.Get()) &&
+                    !Candidates.Contains(Owner))
+                {
+                    Candidates.Add(Owner);
+                    if (Owner->IsA<AAngelIORoomDoor>()) ++Matching;
+                }
+            auto Args = MakeShared<FJsonObject>();
+            Args->SetStringField(TEXT("role"), Role);
+            Args->SetStringField(TEXT("expectedClass"), AAngelIORoomDoor::StaticClass()->GetPathName());
+            Args->SetNumberField(TEXT("candidates"), Candidates.Num());
+            Args->SetStringField(TEXT("scope"), Lookup.bLocal ? GetPathNameSafe(Lookup.Room.Get()) : TEXT("world"));
+            Trace->RecordDecision(TEXT("FindDoor"), Lookup.Name, Matching > 1 ? TEXT("Ambiguous") :
+                Candidates.IsEmpty() ? TEXT("Missing") : TEXT("WrongClass"), AngelIO::CaptureTraceSite(), AngelIO::GetScriptMission(), Args);
+        }
         Call->SetReturnAddress(Door ? new FDoorHandle({Door, FName(*Lookup.Name), Door->GetPlayGeneration()}) : nullptr);
     }
 
@@ -162,8 +185,21 @@ namespace
 
     void HasSavedArrival(asIScriptGeneric* Call)
     {
-        const auto* Lift = static_cast<FLiftHandle*>(Call->GetObject())->Value.Get();
-        Call->SetReturnByte(Lift && Lift->HasSavedArrival(static_cast<int32>(Call->GetArgDWord(0)), AngelIO::GetCheckpointStepId()));
+        const auto& Handle = static_cast<FLiftHandle*>(Call->GetObject())->Value;
+        const auto* Lift = Handle.Get();
+        const int32 Floor = static_cast<int32>(Call->GetArgDWord(0));
+        const FGuid Step = AngelIO::GetCheckpointStepId();
+        const bool Arrived = Lift && Lift->HasSavedArrival(Floor, Step);
+        if (auto* World = AngelIO::GetScriptWorld())
+            if (auto* Trace = World->GetSubsystem<UAngelIOTraceSubsystem>())
+            {
+                auto Args = MakeShared<FJsonObject>();
+                Args->SetNumberField(TEXT("floor"), Floor);
+                if (Step.IsValid()) Args->SetStringField(TEXT("stepId"), Step.ToString(EGuidFormats::DigitsWithHyphensLower));
+                Trace->RecordDecision(TEXT("Lift.HasSavedArrival"), Handle.Target.ToString(),
+                    Arrived ? TEXT("ArrivalCommitted") : TEXT("NoMatchingArrival"), AngelIO::CaptureTraceSite(), Lift, Args);
+            }
+        Call->SetReturnByte(Arrived);
     }
 
     void MoveLift(asIScriptGeneric* Call)

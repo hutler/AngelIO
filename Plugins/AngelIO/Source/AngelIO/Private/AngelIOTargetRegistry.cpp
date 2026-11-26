@@ -2,6 +2,7 @@
 #include "AngelIOScriptComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "AngelIOTraceSubsystem.h"
 
 TArray<UAngelIOScriptComponent*> UAngelIOTargetRegistry::FindTargets(FName TargetName) const
 {
@@ -48,15 +49,22 @@ int32 UAngelIOTargetRegistry::SendTo(FName TargetName, const FString& InputSigna
     return SendToInLevel(TargetName, InputSignal, Value, nullptr);
 }
 
-int32 UAngelIOTargetRegistry::SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level)
+int32 UAngelIOTargetRegistry::SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level, TSharedPtr<FJsonObject> Caller)
 {
     if (GetWorld()->GetNetMode() == NM_Client || InputSignal.IsEmpty()) return 0;
     auto* Members = Groups.Find(TargetName);
-    if (!Members) return 0;
-    Members->RemoveAllSwap([](const auto& P) { return !P.IsValid(); });
-    FDelivery Next{*Members, InputSignal, Value};
+    FDelivery Next{};
+    if (Members)
+    {
+        Members->RemoveAllSwap([](const auto& P) { return !P.IsValid(); });
+        Next.Recipients = *Members;
+    }
+    Next.Input = InputSignal;
+    Next.Value = Value;
     if (Level) Next.Recipients.RemoveAll([Level](const auto& P) { return P->GetOwner()->GetLevel() != Level; });
     const int32 Count = Next.Recipients.Num();
+    auto* Trace = GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>();
+    if (Trace) Next.SignalId = Trace->SignalSent(InputSignal, Value, TargetName.ToString(), Count, MoveTemp(Caller));
     if (Count == 0) return 0;
     Queue.Add(MoveTemp(Next));
     if (!bDelivering)
@@ -73,7 +81,9 @@ int32 UAngelIOTargetRegistry::SendToInLevel(FName TargetName, const FString& Inp
             FDelivery Delivery = MoveTemp(Queue[Index]);
             for (auto& Recipient : Delivery.Recipients)
                 if (auto* Target = Recipient.Get(); Target && Target->HasBegunPlay())
-                    Target->ReceiveNamedInput(Delivery.Input, Delivery.Value);
+                    Target->ReceiveNamedInput(Delivery.Input, Delivery.Value, Delivery.SignalId);
+                else if (Trace)
+                    Trace->SignalRecipient(Delivery.SignalId, GetPathNameSafe(Recipient.Get()), {}, TEXT("TargetGone"));
         }
         Queue.Reset();
     }

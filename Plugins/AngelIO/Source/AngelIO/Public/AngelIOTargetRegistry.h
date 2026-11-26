@@ -5,6 +5,7 @@
 
 class UAngelIOScriptComponent;
 class AActor;
+class FJsonObject;
 
 UCLASS()
 class ANGELIO_API UAngelIOTargetRegistry : public UWorldSubsystem
@@ -19,7 +20,7 @@ public:
     // Returns the number of live recipients selected at send time.
     UFUNCTION(BlueprintCallable, Category="AngelIO")
     int32 SendTo(FName TargetName, const FString& InputSignal, int32 Value);
-    int32 SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level);
+    int32 SendToInLevel(FName TargetName, const FString& InputSignal, int32 Value, const ULevel* Level, TSharedPtr<FJsonObject> Caller = nullptr);
 
 private:
     friend class UAngelIOScriptComponent;
@@ -30,6 +31,7 @@ private:
         TArray<TWeakObjectPtr<UAngelIOScriptComponent>> Recipients;
         FString Input;
         int32 Value;
+        FGuid SignalId;
     };
     TMap<FName, TArray<TWeakObjectPtr<UAngelIOScriptComponent>>> Groups;
     TArray<FDelivery> Queue;

@@ -83,6 +83,10 @@ void Watch(asIScriptGeneric* C, bool Pair, bool All)
     auto Snapshot = MakeShared<FSelection>();
     TOptional<double> Deadline;
     if (Seconds >= 0) Deadline = Seconds;
+    auto Args = MakeShared<FJsonObject>();
+    Args->SetStringField(TEXT("leftTaskId"), A->Data->GetOperationId().ToString(EGuidFormats::DigitsWithHyphensLower));
+    Args->SetStringField(TEXT("rightTaskId"), B->Data->GetOperationId().ToString(EGuidFormats::DigitsWithHyphensLower));
+    Args->SetStringField(TEXT("mode"), Pair ? (All ? TEXT("all") : TEXT("first")) : TEXT("join"));
     AngelIO::AwaitCondition(TEXT("Task.Join"), A->Data->GetOperationId().ToString(EGuidFormats::DigitsWithHyphensLower), Deadline,
         [Left=A->Data, Right=B->Data, All, Snapshot]
         {
@@ -91,7 +95,7 @@ void Watch(asIScriptGeneric* C, bool Pair, bool All)
             Snapshot->Ready = All ? Left->IsComplete() && Right->IsComplete() : Left->IsComplete() || Right->IsComplete();
             if (Snapshot->Ready) Snapshot->Index = Left->IsComplete() ? 0 : 1;
             return Snapshot->Ready;
-        });
+        }, Args);
     C->SetReturnAddress(new FJoin(Snapshot));
 }
 void Join(asIScriptGeneric* C) { Watch(C, false, true); }

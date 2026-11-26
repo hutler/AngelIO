@@ -16,6 +16,7 @@ public:
 
 private:
     friend class FAngelIOInspectorPIE;
+    friend class FAngelIODeliveryDiagnostics;
     friend class FAngelIOSharedInspectorPIE;
     friend class FAngelIOStreamedBytecode;
     friend class FAngelIOCheckpointListen;

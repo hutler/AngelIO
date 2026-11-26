@@ -4,6 +4,7 @@
 #include "Dom/JsonObject.h"
 #include "Tests/AutomationCommon.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/Paths.h"
 #include "Engine/World.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOOwnedTasks, "AngelIO.Missions.OwnedTasks",
@@ -73,6 +74,9 @@ bool FAngelIOOwnedTasks::RunTest(const FString&)
     });
     TestTrue(TEXT("Each task has its own trace ID, one failed and three were cancelled"), Tasks == 8 && Ids.Num() == 8 &&
         Failed == 1 && Cancelled == 3);
+    FString Export;
+    TestTrue(TEXT("Export bounded task history before the branch-limit probe"), World->GetSubsystem<UAngelIOTraceSubsystem>()->Export(Export));
+    AddInfo(TEXT("Task trace export: ") + FPaths::GetCleanFilename(Export));
     FAngelIOProgram Limit;
     TestTrue(TEXT("The 65th live child hits the shared branch limit and tears down all children"), Limit.Compile(TEXT("Limit.as"),
         TEXT("int Work(int i){ NextFrame();return i; } void Run(){ for(int i=0;i<65;i++) StartTask(Work,i); }"), World) &&

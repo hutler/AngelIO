@@ -426,6 +426,71 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIODeliveryDiagnostics, "AngelIO.Network.ListenServer.DeliveryDiagnostics",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FAngelIODeliveryDiagnostics::RunTest(const FString&)
+{
+    auto Tab = FGlobalTabmanager::Get()->TryInvokeTab(SAngelIOMissionInspector::TabId);
+    if (!Tab) return false;
+    auto Inspector = StaticCastSharedRef<SAngelIOMissionInspector>(Tab->GetContent());
+    struct FSession { FDoorRoomView A, B, Replica; FName Original; TWeakObjectPtr<AAngelIORoomPlayerController> Client; };
+    const auto S = MakeShared<FSession>();
+    StartListenSession(TEXT("/Game/Demo/TwoDeliveryRooms"));
+    auto Steps = ListenSteps(this);
+    Steps(TEXT("dispatch to a missing local door"), [S]
+    {
+        auto* Client = FindPeer(NM_Client);
+        auto* Host = FindPeer(NM_ListenServer);
+        if (!S->A.Resolve(Host, 0) || !S->B.Resolve(Host, 850) || !S->Replica.Resolve(Client, 0) ||
+            !S->Replica.DeliveryAt(0, TEXT("Dispatch"), 1, 0)) return false;
+        S->Client = Cast<AAngelIORoomPlayerController>(Client->GetFirstPlayerController());
+        if (!S->Client.IsValid() || !S->Replica.Terminal->IsInReach(S->Client->GetPawn())) return false;
+        auto& Binding = S->A.Terminal->Mission->RoomTargets.FindChecked(TEXT("Door"));
+        S->Original = Binding;
+        Binding = TEXT("UnregisteredDoor");
+        S->Client->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("inspect the failed lookup and retry from the connected client"), [this, S, Inspector]
+    {
+        if (S->Replica.Terminal->Mission->GetWaitingSignal() != TEXT("Retry")) return false;
+        auto* M = S->A.Terminal->Mission.Get();
+        Inspector->SelectWorld(M->GetWorld());
+        Inspector->SelectMission(M);
+        const auto* Failure = Inspector->Operations.FindByPredicate([](const auto& Op) { return Op.Name == TEXT("FindDoor"); });
+        if (TestNotNull(TEXT("Missing door has an inspectable operation"), Failure))
+        {
+            Inspector->SelectOperation(Failure->Id);
+            TestTrue(TEXT("Lookup site, scoped binding and cause appear in the timeline"),
+                Inspector->Timeline.Contains(TEXT("TerminalDelivery.as:56")) && Inspector->Timeline.Contains(TEXT("UnregisteredDoor")) &&
+                Inspector->Timeline.Contains(TEXT("Missing")) && Inspector->Timeline.Contains(TEXT("expectedClass")));
+        }
+        TestEqual(TEXT("The subsequent retry has its own wait line"), Inspector->Location, FString(TEXT("Examples/TerminalDelivery.as:35")));
+        M->RoomTargets[TEXT("Door")] = S->Original;
+        S->Client->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("only the repaired room delivers, then confirm"), [this, S]
+    {
+        if (!S->Replica.DeliveryAt(3, TEXT("Confirm"), 4, 1)) return false;
+        TestTrue(TEXT("B is untouched"), S->B.DeliveryAt(0, TEXT("Dispatch"), 1, 0));
+        TestEqual(TEXT("A single lift trip was issued"), DeliveryCalls(S->A.Terminal->GetWorld(), TEXT("Lift.MoveTo")), 1);
+        S->Client->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("export the confirmed receipt and recipient history"), [this, S]
+    {
+        if (!TripOutput(S->Replica.Terminal->Mission, TEXT("Credits"), 1)) return false;
+        auto* Trace = S->A.Terminal->GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>();
+        FString Path;
+        TestTrue(TEXT("Export delivery diagnostics"), Trace->Export(Path));
+        AddInfo(TEXT("Delivery diagnostics export: ") + FPaths::GetCleanFilename(Path));
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIODeliveryProfile, "AngelIO.Network.ListenServer.DeliveryProfile",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FAngelIODeliveryProfile::RunTest(const FString&)

@@ -139,27 +139,35 @@ const stateEvent = z.object({
   ...eventFields, type: z.enum(["stateSaved", "stateRestored"]), stateId: guid,
   target: z.string(), component: z.string(), field: z.string(), value: z.number().int()
 });
+const diagnosticEvent = z.object({
+  ...eventFields, operationId: guid, type: z.enum(["decision", "signalSent", "signalRecipient"]), reason: z.string()
+}).passthrough();
 const missionEvents = z.array(z.union([operationEvent, checkpointEvent, stateEvent]));
 const traceSchema = z.discriminatedUnion("schemaVersion", [
   z.object({ ...traceFields, schemaVersion: z.literal(1), events: z.array(operationEvent) }),
   z.object({ ...traceFields, schemaVersion: z.literal(2), events: z.array(z.union([operationEvent, checkpointEvent])) }),
   z.object({ ...traceFields, schemaVersion: z.literal(3), events: missionEvents }),
   z.object({ ...traceFields, schemaVersion: z.literal(4), bytecodeCache: bytecodeCache.nullable(), events: missionEvents }),
-  z.object({ ...traceFields, schemaVersion: z.literal(5), bytecodeCache: cacheDetails.nullable(), events: missionEvents })
+  z.object({ ...traceFields, schemaVersion: z.literal(5), bytecodeCache: cacheDetails.nullable(), events: missionEvents }),
+  z.object({ ...traceFields, schemaVersion: z.literal(6), bytecodeCache: cacheDetails.nullable(),
+    events: z.array(z.union([operationEvent, checkpointEvent, stateEvent, diagnosticEvent])) })
 ]);
 
 server.registerTool("read_trace", {
-  description: "Read mission events and the world's bytecode cache. Schema 5 lists resident scripts with their retained bytes and recent hits and evictions with script, size and cache sequence. Reuse the trace filename when paging. Operation, checkpoint and state filters apply to mission events.",
+  description: "Read mission events and the world's bytecode cache. Schema 5 lists resident scripts with their retained bytes and recent hits and evictions with script, size and cache sequence. Reuse the trace filename when paging. Schema 6 includes scoped lookup and recovery decisions and per-recipient signals. Filter by run, task, signal, operation, checkpoint or native state ID.",
   inputSchema: {
     trace: z.string().regex(traceFilename).optional().describe("Export filename. Omit to read the latest export."),
     operationId: guid.optional(),
+    runId: guid.optional().describe("Mission instance. Includes retained operations called or observed by that run."),
+    taskId: guid.optional().describe("Task, its parent/child calls and observations."),
+    signalId: guid.optional().describe("Operation ID of a signalSent or signalRecipient row."),
     checkpointId: guid.optional().describe("Checkpoint ID from the mission inspector or a checkpoint event."),
     stateId: guid.optional().describe("State ID from the inspector or a stateSaved/stateRestored event. Use the same ID in both server exports."),
     afterSequence: z.number().int().nonnegative().default(0),
     limit: z.number().int().min(1).max(200).default(50)
   }, annotations
-}, async ({ trace, operationId, checkpointId, stateId, afterSequence, limit }) => {
-  if ([operationId, checkpointId, stateId].filter(Boolean).length > 1) throw new Error("Choose one of operationId, checkpointId or stateId.");
+}, async ({ trace, operationId, runId, taskId, signalId, checkpointId, stateId, afterSequence, limit }) => {
+  if ([operationId, runId, taskId, signalId, checkpointId, stateId].filter(Boolean).length > 1) throw new Error("Choose one trace identity filter.");
   const directory = path.join(path.dirname(project), "Saved", "AngelIO", "Traces");
   const noExports = "No AngelIO trace found. Use AngelIO.ExportTrace on the host or end a PIE session with mission events or a registered script engine.";
   let entries;
@@ -172,12 +180,19 @@ server.registerTool("read_trace", {
   const target = await realpath(path.join(directory, filename));
   if (path.relative(directory, target) !== filename) throw new Error("Trace resolves outside the project trace directory");
   const { events, ...metadata } = traceSchema.parse(JSON.parse(await readFile(target, "utf8")));
+  const run = runId?.toLowerCase(), task = taskId?.toLowerCase(), signal = signalId?.toLowerCase();
+  const belongs = event => run ? [event.instanceId, event.caller?.instanceId, event.waiter?.instanceId, event.arguments?.missionId].includes(run)
+    : task ? [event.operationId, event.caller?.branchId, event.waiter?.branchId, event.arguments?.parentId,
+      event.arguments?.leftTaskId, event.arguments?.rightTaskId].includes(task) : false;
+  const related = new Set();
+  if (run || task) for (const event of events) if (event.operationId && belongs(event)) related.add(event.operationId);
   const operation = operationId?.toLowerCase();
   const checkpoint = checkpointId?.toLowerCase();
   const state = stateId?.toLowerCase();
   const matches = events.filter(event => event.sequence > afterSequence &&
     (!operation || event.operationId === operation) && (!checkpoint || event.checkpointId === checkpoint) &&
-    (!state || event.stateId === state));
+    (!state || event.stateId === state) && (!signal || (event.operationId === signal && event.type.startsWith("signal"))) &&
+    (!(run || task) || belongs(event) || related.has(event.operationId)));
   const page = matches.slice(0, limit);
   return result({ trace: filename, ...metadata, events: page,
     nextAfterSequence: matches.length > limit ? page.at(-1).sequence : null });

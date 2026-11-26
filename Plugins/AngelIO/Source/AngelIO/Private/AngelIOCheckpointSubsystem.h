@@ -27,7 +27,7 @@ public:
     bool Save(const UActorComponent& Component, const FString& Script, FCheckpoint& Record, FString& Error);
     bool LoadState(const UActorComponent& Component, const FString& Key, TArray<uint8>& Data, FString& Error);
     bool SaveState(const UActorComponent& Component, const FString& Key, TConstArrayView<uint8> Data, FString& Error);
-    bool RecordOnce(const UActorComponent& Component, const FString& Script, const FString& Action, FGuid& Receipt, FString& Error);
+    bool RecordOnce(const UActorComponent& Component, const FString& Script, const FString& Action, FGuid& Receipt, FString& Error, bool* Created = nullptr);
     FGuid StateId(const UActorComponent& Component, const FString& Key) const;
 
 private:

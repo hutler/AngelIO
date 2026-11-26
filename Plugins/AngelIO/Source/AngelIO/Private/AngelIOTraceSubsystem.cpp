@@ -67,6 +67,39 @@ void UAngelIOTraceSubsystem::RecordCheckpoint(bool bSaved, const FGuid& Checkpoi
     Event->SetObjectField(TEXT("caller"), Caller);
 }
 
+FGuid UAngelIOTraceSubsystem::SignalSent(const FString& Signal, int32 Value, const FString& Target, int32 Count,
+    TSharedPtr<FJsonObject> Caller)
+{
+    const FGuid Id = FGuid::NewGuid();
+    auto Row = Append(Id, TEXT("signalSent"), nullptr);
+    Row->SetStringField(TEXT("operation"), Signal);
+    Row->SetStringField(TEXT("target"), Target);
+    Row->SetNumberField(TEXT("value"), Value);
+    Row->SetNumberField(TEXT("recipients"), Count);
+    Row->SetStringField(TEXT("reason"), Count ? TEXT("Dispatched") : TEXT("NoMatch"));
+    if (Caller) Row->SetObjectField(TEXT("caller"), Caller);
+    return Id;
+}
+
+void UAngelIOTraceSubsystem::SignalRecipient(FGuid SignalId, const FString& Component, FGuid Instance, const FString& Outcome)
+{
+    auto Row = Append(SignalId, TEXT("signalRecipient"), nullptr);
+    Row->SetStringField(TEXT("component"), Component);
+    if (Instance.IsValid()) Row->SetStringField(TEXT("instanceId"), Instance.ToString(EGuidFormats::DigitsWithHyphensLower));
+    Row->SetStringField(TEXT("reason"), Outcome);
+}
+
+void UAngelIOTraceSubsystem::RecordDecision(const FString& Operation, const FString& Target, const FString& Reason,
+    TSharedRef<FJsonObject> Caller, const UObject* Subject, TSharedPtr<FJsonObject> Arguments)
+{
+    auto Row = Append(FGuid::NewGuid(), TEXT("decision"), Subject);
+    Row->SetStringField(TEXT("operation"), Operation);
+    Row->SetStringField(TEXT("target"), Target);
+    Row->SetStringField(TEXT("reason"), Reason);
+    Row->SetObjectField(TEXT("caller"), Caller);
+    if (Arguments) Row->SetObjectField(TEXT("arguments"), Arguments);
+}
+
 bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
 {
     check(IsInGameThread());
@@ -74,7 +107,7 @@ bool UAngelIOTraceSubsystem::Export(FString& OutFile) const
     const auto Cache = FinalCache.IsSet() ? FinalCache : AngelIO::GetBytecodeCacheSnapshot(GetWorld());
     if (Events.IsEmpty() && !Cache.IsSet()) return false;
     auto Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("schemaVersion"), 5);
+    Root->SetNumberField(TEXT("schemaVersion"), 6);
     Root->SetStringField(TEXT("sessionId"), SessionId.ToString(EGuidFormats::DigitsWithHyphensLower));
     Root->SetStringField(TEXT("world"), GetWorld()->GetName());
     Root->SetStringField(TEXT("netMode"), NetMode.IsEmpty() ? TraceNetMode(*GetWorld()) : NetMode);

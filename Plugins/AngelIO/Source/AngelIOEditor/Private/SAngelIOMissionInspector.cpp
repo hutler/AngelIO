@@ -153,7 +153,7 @@ namespace
     {
         const FString Type = Field(Event, TEXT("type"));
         FString Detail;
-        if (Type == TEXT("call"))
+        if (Type == TEXT("call") || Type == TEXT("decision") || Type == TEXT("signalSent"))
         {
             Detail = Field(Event, TEXT("operation")) + TEXT(" → ") + Field(Event, TEXT("target"));
             const TSharedPtr<FJsonObject>* Args = nullptr;
@@ -164,13 +164,16 @@ namespace
                 Detail += TEXT("  ") + Json;
             }
         }
+        else if (Type == TEXT("signalRecipient"))
+            Detail = Field(Event, TEXT("component"));
         else if (Type == TEXT("complete"))
             Detail = (Field(Event, TEXT("status")) + TEXT("  ") + Field(Event, TEXT("reason"))).TrimEnd();
         else if (Field(Event, TEXT("outcome")) == TEXT("TimedOut"))
             Detail = TEXT("Waiter timed out");
         else if (Type == TEXT("wait"))
             Detail = Event.GetBoolField(TEXT("suspended")) ? TEXT("Suspended") : TEXT("Already complete");
-        const auto* Source = Site(Event, Type == TEXT("call") ? TEXT("caller") : TEXT("waiter"));
+        if (Type == TEXT("decision") || Type.StartsWith(TEXT("signal"))) Detail += TEXT("  ") + Field(Event, TEXT("reason"));
+        const auto* Source = Site(Event, Event.HasField(TEXT("caller")) ? TEXT("caller") : TEXT("waiter"));
         if (Source)
         {
             const FString File = Field(*Source, TEXT("script"));
@@ -519,7 +522,7 @@ void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority
         if (!Event.TryGetStringField(TEXT("operationId"), OperationId)) return;
         const auto* Caller = Site(Event, TEXT("caller"));
         const auto* Waiter = Site(Event, TEXT("waiter"));
-        if (Target == &Authority || Target == Authority.GetOwner() ||
+        if (Target == &Authority || Target == Authority.GetOwner() || Field(Event, TEXT("instanceId")) == Instance ||
             (Caller && Field(*Caller, TEXT("instanceId")) == Instance) ||
             (Waiter && Field(*Waiter, TEXT("instanceId")) == Instance))
             Related.FindOrAdd(OperationId);
@@ -529,7 +532,8 @@ void SAngelIOMissionInspector::CollectHistory(UAngelIOScriptComponent& Authority
         auto* Op = Related.Find(Field(Event, TEXT("operationId")));
         if (!Op) return;
         const FString Type = Field(Event, TEXT("type"));
-        if (Type == TEXT("call"))
+        if (Type == TEXT("decision") || Type.StartsWith(TEXT("signal"))) Op->Status = Field(Event, TEXT("reason"));
+        if (Type == TEXT("call") || Type == TEXT("decision") || Type == TEXT("signalSent"))
         {
             Op->Name = Field(Event, TEXT("operation"));
             Op->Target = Field(Event, TEXT("target"));

@@ -10,7 +10,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const { values } = parseArgs({ options: {
   project: { type: "string" }, editor: { type: "string" }, trace: { type: "string" },
-  "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" },
+  "task-trace": { type: "string" }, "delivery-trace": { type: "string" }, "timeout-trace": { type: "string" }, "checkpoint-trace": { type: "string" },
   "landing-write-trace": { type: "string" }, "landing-read-trace": { type: "string" },
   "cache-visits": { type: "string", multiple: true }
 } });
@@ -46,12 +46,12 @@ try {
       const reply = await call("read_trace", { trace, limit: 1 });
       assert(!reply.isError, JSON.stringify(reply.content));
       const snapshot = reply.structuredContent;
-      assert([4, 5].includes(snapshot.schemaVersion));
+      assert([4, 5, 6].includes(snapshot.schemaVersion));
       assert.equal(snapshot.netMode, "listenServer");
       const cache = snapshot.bytecodeCache;
       const exported = JSON.parse(await readFile(path.join(traceDir, trace), "utf8"));
       assert.deepEqual(cache, exported.bytecodeCache);
-      if (snapshot.schemaVersion === 5) {
+      if (snapshot.schemaVersion >= 5) {
         assert.equal(cache.residentScripts.reduce((sum, row) => sum + row.retainedBytes, 0), cache.retainedBytes);
         assert.equal(new Set(cache.residentScripts.map(row => row.script)).size, cache.residentScripts.length);
         assert.equal(cache.droppedActivity, 0);
@@ -75,7 +75,7 @@ try {
     assert([0, 3072, 32768].includes(after.budgetBytes));
     assert.equal(after.hits - before.hits, after.budgetBytes === 32768 ? 4 : 0);
     assert.equal(after.evictions - before.evictions, after.budgetBytes === 3072 ? 4 : 0);
-    if (reload.schemaVersion === 5) {
+    if (reload.schemaVersion >= 5) {
       const reloadActivity = after.recentActivity.filter(row => row.sequence > before.hits + before.evictions);
       const roomScripts = ["Elevator.as", "Elevator.as", "Examples/BlinkPanel.as", "Examples/RoomDelivery.as"];
       assert.deepEqual(reloadActivity.map(row => row.script).sort(), after.budgetBytes ? roomScripts : []);
@@ -92,6 +92,56 @@ try {
     }
     console.log("read_trace verified cache across reload at " + after.budgetBytes + " bytes: " + files.join(", "));
   }
+  if (values["task-trace"]) {
+    const trace = values["task-trace"];
+    const read = async args => {
+      const reply = await call("read_trace", { trace, ...args });
+      assert(!reply.isError, JSON.stringify(reply.content));
+      return reply.structuredContent.events;
+    };
+    const all = await read({ limit: 200 });
+    const watch = all.find(e => e.arguments?.mode === "first" && e.arguments.leftTaskId !== e.arguments.rightTaskId);
+    const child = watch.arguments.rightTaskId;
+    const selected = await read({ taskId: child, limit: 200 });
+    assert(selected.some(e => e.operationId === child && e.status === "Succeeded"));
+    assert(selected.some(e => e.operationId === watch.operationId && e.type === "resume"));
+    assert(selected.some(e => e.caller?.branchId === child && e.operation === "NextFrame"));
+    assert(!selected.some(e => e.operation === "Task.Start" && e.operationId === watch.arguments.leftTaskId));
+    console.log("Verified task tree and right operand of WatchFirst via read_trace");
+  }
+  if (values["delivery-trace"]) {
+    const read = async args => {
+      const reply = await call("read_trace", { trace: values["delivery-trace"], ...args });
+      assert(!reply.isError, JSON.stringify(reply.content));
+      return reply.structuredContent;
+    };
+    let events = [], cursor = 0;
+    do {
+      const page = await read({ limit: 25, afterSequence: cursor });
+      assert.equal(page.netMode, "listenServer");
+      events.push(...page.events);
+      cursor = page.nextAfterSequence;
+    } while (cursor !== null);
+    const failure = events.find(e => e.type === "decision" && e.operation === "FindDoor" && e.reason === "Missing");
+    assert.equal(failure.target, "UnregisteredDoor");
+    assert.equal(failure.caller.line, 56);
+    assert.equal(failure.arguments.role, "Door");
+    const runId = failure.caller.instanceId;
+    const mine = (await read({ runId, limit: 200 })).events;
+    assert(mine.some(e => e.operationId === failure.operationId));
+    assert(mine.some(e => e.operation === "RecordOnce" && e.reason === "Created" && e.arguments.receiptId));
+    assert.equal(mine.filter(e => e.operation === "Lift.MoveTo").length, 1);
+    for (const name of ["Dispatch", "Retry", "Confirm"]) {
+      const send = mine.find(e => e.type === "signalSent" && e.operation === name);
+      const rows = (await read({ signalId: send.operationId })).events;
+      assert.deepEqual(rows.map(e => e.type), ["signalSent", "signalRecipient"]);
+      assert.equal(rows[1].instanceId, runId);
+      assert.equal(rows[1].reason, "Consumed");
+      assert(send.caller.component.includes("PlayerController"));
+    }
+    assert.deepEqual((await read({ runId: randomUUID() })).events, []);
+    console.log("Verified room-scoped lookup, client signals, retry and action receipt via read_trace");
+  }
   if (values.trace) {
     const read = async (args = {}) => {
       const reply = await call("read_trace", { trace: values.trace, ...args });
@@ -103,11 +153,11 @@ try {
     assert.equal(history.droppedEvents, 0);
     const calls = history.events.filter(e => e.type === "call");
     assert.equal(new Set(calls.map(e => e.operationId)).size, 6);
-    for (const schemaVersion of [1, 2, 3, 4, 5]) {
+    for (const schemaVersion of [1, 2, 3, 4, 5, 6]) {
       const { sessionId, world, netMode, droppedEvents } = history;
       const sample = { schemaVersion, sessionId, world, netMode, droppedEvents, events: [calls[0]] };
       if (schemaVersion === 4) sample.bytecodeCache = { budgetBytes: 1024, retainedBytes: 900, hits: 1, evictions: 0 };
-      if (schemaVersion === 5) sample.bytecodeCache = null;
+      if (schemaVersion >= 5) sample.bytecodeCache = null;
       const trace = "00000000-000000-000-" + randomUUID().replaceAll("-", "") + ".json";
       const filename = path.join(traceDir, trace);
       await writeFile(filename, JSON.stringify(sample), { flag: "wx" });
@@ -167,7 +217,7 @@ try {
       return reply.structuredContent;
     };
     const history = await read({ limit: 200 });
-    assert([2, 3, 4, 5].includes(history.schemaVersion));
+    assert([2, 3, 4, 5, 6].includes(history.schemaVersion));
     assert.equal(history.netMode, "listenServer");
     const checkpointId = history.events.find(e => e.type === "checkpointSaved").checkpointId;
     const first = await read({ checkpointId, limit: 2 });
@@ -211,7 +261,7 @@ try {
     const before = await read(writer);
     const after = await read(reader);
     for (const history of [before, after]) {
-      assert([3, 4, 5].includes(history.schemaVersion));
+      assert([3, 4, 5, 6].includes(history.schemaVersion));
       assert.equal(history.netMode, "listenServer");
       assert.equal(history.droppedEvents, 0);
     }

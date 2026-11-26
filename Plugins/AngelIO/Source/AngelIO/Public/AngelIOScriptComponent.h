@@ -104,6 +104,7 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="AngelIO")
     bool SendSignal(const FString& Name, int32 Value);
+    bool SendSignalFrom(const FString& Name, int32 Value, const UObject& Sender);
 
     UFUNCTION(BlueprintPure, Category="AngelIO")
     FString GetWaitingSignal() const;
@@ -125,7 +126,8 @@ protected:
 
 private:
     friend class UAngelIOTargetRegistry;
-    void ReceiveNamedInput(const FString& Name, int32 Value);
+    void ReceiveNamedInput(const FString& Name, int32 Value, FGuid SignalId);
+    bool DeliverSignal(const FString& Name, int32 Value, FGuid SignalId);
     UPROPERTY(EditAnywhere, Replicated, Category="AngelIO")
     FName TargetName;
 

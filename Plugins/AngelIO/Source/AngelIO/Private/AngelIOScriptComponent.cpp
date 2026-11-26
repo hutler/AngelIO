@@ -105,9 +105,34 @@ void UAngelIOScriptComponent::SetTargetName(FName Name)
     TargetName = Name;
 }
 
-void UAngelIOScriptComponent::ReceiveNamedInput(const FString& Name, int32 Value)
+bool UAngelIOScriptComponent::DeliverSignal(const FString& Name, int32 Value, FGuid SignalId)
 {
-    SendSignal(Name, Value);
+    const FGuid Recipient = Program ? Program->GetInstanceId() : FGuid();
+    const FString Path = SignalId.IsValid() ? GetPathName(GetWorld()) : FString();
+    const bool bAccepted = SendSignal(Name, Value);
+    if (SignalId.IsValid())
+        if (auto* Trace = GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>())
+            Trace->SignalRecipient(SignalId, Path, Recipient, bAccepted ? TEXT("Consumed") : TEXT("NoScriptWait"));
+    return bAccepted;
+}
+
+bool UAngelIOScriptComponent::SendSignalFrom(const FString& Name, int32 Value, const UObject& Sender)
+{
+    if (!CanRunMission()) return false;
+    FGuid Id;
+    if (auto* Trace = GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>())
+    {
+        auto Caller = MakeShared<FJsonObject>();
+        Caller->SetStringField(TEXT("kind"), TEXT("native"));
+        Caller->SetStringField(TEXT("component"), Sender.GetPathName(GetWorld()));
+        Id = Trace->SignalSent(Name, Value, GetPathName(GetWorld()), 1, Caller);
+    }
+    return DeliverSignal(Name, Value, Id);
+}
+
+void UAngelIOScriptComponent::ReceiveNamedInput(const FString& Name, int32 Value, FGuid SignalId)
+{
+    DeliverSignal(Name, Value, SignalId);
     if (HasBegunPlay()) OnNamedInput.Broadcast(Name, Value);
 }
 
@@ -331,7 +356,7 @@ void UAngelIOScriptComponent::DispatchPendingEvents()
             if (auto* Registry = GetWorld()->GetSubsystem<UAngelIOTargetRegistry>())
             {
                 const FName* Bound = RoomTargets.Find(Event.Target);
-                Registry->SendToInLevel(Bound ? *Bound : Event.Target, Event.Name, Event.Value, Bound ? GetOwner()->GetLevel() : nullptr);
+                Registry->SendToInLevel(Bound ? *Bound : Event.Target, Event.Name, Event.Value, Bound ? GetOwner()->GetLevel() : nullptr, Event.Caller);
             }
             continue;
         }
@@ -395,5 +420,17 @@ void UAngelIOScriptComponent::TickComponent(float DeltaTime, ELevelTick TickType
 void UAngelIOScriptComponent::ReportErrors() const
 {
     for (const auto& D : Program->Diagnostics())
+    {
+        if (auto* Trace = D.Severity == TEXT("error") ? GetWorld()->GetSubsystem<UAngelIOTraceSubsystem>() : nullptr)
+        {
+            auto Site = MakeShared<FJsonObject>();
+            Site->SetStringField(TEXT("script"), Script);
+            Site->SetNumberField(TEXT("line"), D.Line);
+            Site->SetStringField(TEXT("component"), GetPathName(GetWorld()));
+            const FGuid Instance = Program->GetInstanceId();
+            if (Instance.IsValid()) Site->SetStringField(TEXT("instanceId"), Instance.ToString(EGuidFormats::DigitsWithHyphensLower));
+            Trace->RecordDecision(TEXT("Mission.Error"), Script, D.Message, Site, this);
+        }
         UE_LOG(LogAngelIO, Warning, TEXT("%s(%d,%d) %s: %s"), *Script, D.Line, D.Column, *D.Severity, *D.Message);
+    }
 }

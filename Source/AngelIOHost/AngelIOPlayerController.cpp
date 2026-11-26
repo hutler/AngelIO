@@ -51,7 +51,7 @@ void AAngelIORoomPlayerController::ServerUseTerminal_Implementation(AAngelIORoom
     if (ExpectedInput.IsNone()) ExpectedInput = TEXT("Activate"); // Original single-action terminal.
     if (ExpectedInput == FName(*Waiting) && (Waiting == TEXT("Activate") || Waiting == TEXT("Dispatch") ||
         Waiting == TEXT("Retry") || Waiting == TEXT("Confirm")))
-        Terminal->Mission->SendSignal(Waiting, 0);
+        Terminal->Mission->SendSignalFrom(Waiting, 0, *this);
 }
 
 void AAngelIOPlayerController::ServerRequestLiftFloor_Implementation(int32 Floor)

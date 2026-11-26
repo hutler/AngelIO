@@ -35,8 +35,8 @@ namespace
 {
     struct FConditionWait final : FAngelIOOperation
     {
-        FConditionWait(UWorld* World, const FString& Label, const FString& Target, TFunction<bool()> InReady)
-            : FAngelIOOperation(World, Label, Target), IsReady(MoveTemp(InReady)) {}
+        FConditionWait(UWorld* World, const FString& Label, const FString& Target, TFunction<bool()> InReady, TSharedPtr<FJsonObject> Args)
+            : FAngelIOOperation(World, Label, Target, MoveTemp(Args)), IsReady(MoveTemp(InReady)) {}
 
         void Poll() { if (IsReady()) MarkComplete(TEXT("Ready")); }
         void Timeout() { MarkComplete(TEXT("TimedOut")); }
@@ -201,6 +201,8 @@ UWorld* AngelIO::GetScriptWorld()
     return Scope ? Scope->World.Get() : nullptr;
 }
 
+TSharedRef<FJsonObject> AngelIO::CaptureTraceSite() { return CaptureSite(); }
+
 FGuid AngelIO::GetCheckpointStepId()
 {
     auto* Context = asGetActiveContext();
@@ -254,11 +256,11 @@ TSharedRef<const EAngelIOWaitOutcome> AngelIO::AwaitOperation(TSharedRef<FAngelI
 }
 
 void AngelIO::AwaitCondition(const FString& Label, const FString& Target, TOptional<double> TimeoutSeconds,
-    TFunction<bool()> IsReady)
+    TFunction<bool()> IsReady, TSharedPtr<FJsonObject> Arguments)
 {
     auto* Scope = GetWaitScope(TimeoutSeconds);
     if (!Scope) return;
-    auto Condition = MakeShared<FConditionWait>(Scope->World.Get(), Label, Target, MoveTemp(IsReady));
+    auto Condition = MakeShared<FConditionWait>(Scope->World.Get(), Label, Target, MoveTemp(IsReady), MoveTemp(Arguments));
     Condition->Poll();
     const auto Outcome = AwaitOperation(Condition, Label, TimeoutSeconds);
     if (*Outcome == EAngelIOWaitOutcome::Pending) Scope->Condition = Condition;
@@ -599,7 +601,8 @@ struct FAngelIOProgram::FImpl
             Context->SetException("None is not an addressable target");
             return;
         }
-        Self->EventQueue().Add({UTF8_TO_TCHAR(Input.c_str()), static_cast<int32>(Call->GetArgDWord(2)), TargetName});
+        Self->EventQueue().Add({UTF8_TO_TCHAR(Input.c_str()), static_cast<int32>(Call->GetArgDWord(2)), TargetName, false,
+            Self->Scope.World.IsValid() && Self->Scope.World->GetSubsystem<UAngelIOTraceSubsystem>() ? CaptureSite().ToSharedPtr() : nullptr});
     }
     static void Emit(asIScriptGeneric* Call) { SignalCall(Call, false); }
     static void BranchSignal(asIScriptGeneric* Call)
@@ -784,9 +787,21 @@ struct FAngelIOProgram::FImpl
         }
         FGuid Id;
         FString Error;
-        if (!World->GetSubsystem<UAngelIOCheckpointSubsystem>()->RecordOnce(*Mission, Self->ScriptSection, UTF8_TO_TCHAR(Action.c_str()), Id, Error))
+        bool Created = false;
+        const FString Key = UTF8_TO_TCHAR(Action.c_str());
+        if (!World->GetSubsystem<UAngelIOCheckpointSubsystem>()->RecordOnce(*Mission, Self->ScriptSection, Key, Id, Error, &Created))
+        {
             Context->SetException(TCHAR_TO_UTF8(*Error));
-        else Result->assign(TCHAR_TO_UTF8(*Id.ToString(EGuidFormats::DigitsWithHyphensLower)));
+            return;
+        }
+        const FString Receipt = Id.ToString(EGuidFormats::DigitsWithHyphensLower);
+        Result->assign(TCHAR_TO_UTF8(*Receipt));
+        if (auto* Trace = World->GetSubsystem<UAngelIOTraceSubsystem>())
+        {
+            auto Args = MakeShared<FJsonObject>();
+            Args->SetStringField(TEXT("receiptId"), Receipt);
+            Trace->RecordDecision(TEXT("RecordOnce"), Key, Created ? TEXT("Created") : TEXT("Reused"), CaptureSite(), Mission, Args);
+        }
     }
 
     // Give the public functions the enum types declared by this mission. Use the
@@ -1320,6 +1335,8 @@ const TArray<FString>& FAngelIOProgram::ExternalDeclarations() const { return Im
 const TArray<FAngelIOPort>& FAngelIOProgram::Ports() const { return Impl->PublicPorts; }
 const TMap<int32, FString>& FAngelIOProgram::Signals(bool bIncoming) const { return bIncoming ? Impl->Inputs : Impl->Outputs; }
 const TArray<FAngelIODiagnostic>& FAngelIOProgram::Diagnostics() const { return Impl->Messages; }
+FGuid FAngelIOProgram::GetInstanceId() const { return Impl->Scope.InstanceId; }
+
 TArray<FAngelIOEvent> FAngelIOProgram::TakeEvents() { return MoveTemp(Impl->Events); }
 EAngelIOState FAngelIOProgram::State() const { return Impl->Status; }
 FString FAngelIOProgram::WaitingFor() const { return Impl->Waiting; }

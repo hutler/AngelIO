@@ -37,6 +37,7 @@ namespace AngelIO
     // Identity of the last saved or matching loaded checkpoint (writer, version and stage).
     // Invalid outside a mission or after a checkpoint lookup misses.
     ANGELIO_API FGuid GetCheckpointStepId();
+    ANGELIO_API TSharedRef<FJsonObject> CaptureTraceSite();
     // A completed operation returns inline. A pending operation suspends Run.
     ANGELIO_API void AwaitOperation(TSharedRef<FAngelIOOperation> Operation, const FString& Label);
     // One outcome per reader. An empty timeout waits indefinitely; zero polls.
@@ -45,7 +46,7 @@ namespace AngelIO
     // Supply a side-effect-free game-thread predicate and capture world objects weakly.
     // Checks immediately and on each update of this waiting VM until ready or expired.
     ANGELIO_API void AwaitCondition(const FString& Label, const FString& Target, TOptional<double> TimeoutSeconds,
-        TFunction<bool()> IsReady);
+        TFunction<bool()> IsReady, TSharedPtr<FJsonObject> Arguments = nullptr);
 }
 
 // Register before the first mission compiles. Each authority world keeps its registered

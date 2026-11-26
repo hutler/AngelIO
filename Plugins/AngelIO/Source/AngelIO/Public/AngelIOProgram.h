@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "AngelIOProgram.generated.h"
 
+class FJsonObject;
 class UWorld;
 class UActorComponent;
 class UAngelIOScriptWorldSubsystem;
@@ -53,6 +54,7 @@ struct FAngelIOEvent
     int32 Value;
     FName Target = NAME_None;
     bool bNotifySelf = false;
+    TSharedPtr<FJsonObject> Caller;
 };
 
 enum class EAngelIOState { Empty, Compiled, Running, Waiting, Finished, Failed };
@@ -115,6 +117,7 @@ public:
     const TArray<FAngelIOPort>& Ports() const;
     const TMap<int32, FString>& Signals(bool bIncoming) const;
     const TArray<FAngelIODiagnostic>& Diagnostics() const;
+    FGuid GetInstanceId() const;
     TArray<FAngelIOEvent> TakeEvents();
     EAngelIOState State() const;
     FString WaitingFor() const;
