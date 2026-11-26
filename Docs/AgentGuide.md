@@ -82,7 +82,8 @@ The two instances in `/Game/Demo/TwoDeliveryRooms` share `/Game/Demo/DeliveryRoo
 | Opening | Read the door's persisted open state. Open a closed door and wait for completion. |
 | Dispatched | Wait for the local lift. A landing receipt for this checkpoint step and floor fulfills the trip. |
 | Delivered | Publish phase 3 and accept Confirm. The cab and the door restore their physical state independently. |
-| Complete | Publish phase 4. The room has completed its delivery. |
+| Confirming | Commit the room's delivery credit, then save Complete. Replaying the credit returns the same receipt ID. |
+| Complete | Publish phase 4 and one credit. Earlier completed deliveries receive the same one-credit entitlement. |
 
 On the client, `Phase` is 0 (ready), 1 (opening), 2 (riding), 3 (awaiting confirmation), 4 (complete) or 5 (awaiting retry). In phase 5, `Failure` distinguishes a missing door (1), failed opening (2), unavailable lift (3), ride timeout (4) and rejected or cancelled ride (5). The indicator is a replicated mission output. The player controller sends the input observed by the client and the server checks both proximity and the current wait.
 
@@ -99,6 +100,10 @@ The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftT
 Rebuild the editor after changing a binding. Check the new signature in `describe_api.externalDeclarations`, compile a small caller, then exercise the behavior. The demo result exposes `Id`, `Floor` and `Status`. Reasons such as `LiftBusy` appear in the trace's `complete` event. Use `trip.Id` or `result.Id` to correlate the outcome with the native operation's `GetOperationId()`. Two invocations on the same actor and floor still have distinct IDs.
 
 ### World-owned AngelScript engine
+
+On first writable access to a version-zero SQLite slot, AngelIO takes a consistent snapshot beside the original using the suffix `.pre-v1`. It upgrades the schema transactionally. Inspection opens the slot read-only. For an opted-in component the store checks its current and former addresses. A single legacy match moves to the stable key with its original checkpoint ID, writer, stage and version. Conflicting matches fail. Components without an authored ID retain their legacy keys.
+
+`RequireCheckpoint(version)` returns an empty stage for a missing record and fails the mission for incompatible or corrupt data. `LoadCheckpoint` retains its earlier version-mismatch behavior. `RecordOnce("DeliveryCredit")` commits one entitlement and returns its persistent UUID on every replay. A service applying external rewards must use this UUID as its idempotency key. [Migration and interrupted grant test](../Plugins/AngelIO/Source/AngelIO/Private/Tests/AngelIOStoreTests.cpp)
 
 From v0.7.0 the first mission compiled in an authority game world registers the core and game-module bindings. Each component gets its own module, globals, context, wait state and source diagnostics. `EndPlay` discards the room's modules. Even a world with zero remaining missions keeps its registered engine until teardown. Provider registration failure leaves the world free to retry with a fresh engine.
 

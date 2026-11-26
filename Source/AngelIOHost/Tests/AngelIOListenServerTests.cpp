@@ -418,6 +418,8 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
     {
         if (!S->ClientA.DeliveryAt(4, TEXT(""), 4, 0) || !S->A.DeliveryAt(4, TEXT(""), 4, 0)) return false;
         TestEqual(TEXT("Confirmation never issues another ride"), DeliveryCalls(FindPeer(NM_ListenServer), TEXT("Lift.MoveTo")), 2);
+        TestTrue(TEXT("Both terminals replicated one independent delivery credit"), TripOutput(S->ClientA.Terminal->Mission, TEXT("Credits"), 1) &&
+            TripOutput(S->ClientB.Terminal->Mission, TEXT("Credits"), 1));
         return true;
     });
     EndListenSession();

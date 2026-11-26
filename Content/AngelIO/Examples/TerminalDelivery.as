@@ -8,6 +8,7 @@ float in_Timeout = 8.0f;
 int out_Phase;
 int out_Failure;
 bool out_Lamp;
+int out_Credits;
 
 void Blink()
 {
@@ -38,7 +39,7 @@ void AwaitRetry(Failure reason)
 
 void Run()
 {
-    string stage = LoadCheckpoint(1);
+    string stage = RequireCheckpoint(1);
     if (stage == "")
     {
         WaitFor(InputSignal::Dispatch);
@@ -85,8 +86,15 @@ void Run()
     {
         out_Phase = Phase::AwaitConfirm;
         WaitFor(InputSignal::Confirm);
-        SaveCheckpoint("Complete", 1);
-        stage = "Complete";
+        SaveCheckpoint("Confirming", 1);
+        stage = "Confirming";
     }
-    if (stage == "Complete") out_Phase = Phase::Complete;
+    if (stage == "Confirming" || stage == "Complete")
+    {
+        // Includes confirmations written before the credit was introduced.
+        RecordOnce("DeliveryCredit");
+        if (stage == "Confirming") SaveCheckpoint("Complete", 1);
+        out_Credits = 1;
+        out_Phase = Phase::Complete;
+    }
 }

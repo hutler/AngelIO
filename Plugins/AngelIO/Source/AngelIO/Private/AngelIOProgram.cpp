@@ -644,7 +644,7 @@ struct FAngelIOProgram::FImpl
             asGetActiveContext()->SetException("SignalValue requires an active mission context");
     }
 
-    static void AccessCheckpoint(asIScriptGeneric* Call, bool bSave)
+    static void AccessCheckpoint(asIScriptGeneric* Call, bool bSave, bool bStrict = false)
     {
         auto* Context = asGetActiveContext();
         auto* Self = static_cast<FImpl*>(Context->GetUserData());
@@ -700,6 +700,9 @@ struct FAngelIOProgram::FImpl
             if (Record.Version != Version)
             {
                 Self->Scope.CheckpointStepId.Invalidate();
+                if (bStrict && Record.Version != 0)
+                    Context->SetException(TCHAR_TO_UTF8(*FString::Printf(TEXT("Incompatible mission checkpoint: stored version %d, expected %d"),
+                        Record.Version, Version)));
                 return;
             }
             Result->assign(reinterpret_cast<const char*>(*Record.Stage), Record.Stage.Len());
@@ -719,7 +722,29 @@ struct FAngelIOProgram::FImpl
             Trace->RecordCheckpoint(bSave, Record.Id, FString(Record.Stage), Version, Record.SavedBy, CaptureSite());
     }
     static void LoadCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, false); }
+    static void RequireCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, false, true); }
     static void SaveCheckpoint(asIScriptGeneric* Call) { AccessCheckpoint(Call, true); }
+
+    static void RecordOnce(asIScriptGeneric* Call)
+    {
+        auto* Context = asGetActiveContext();
+        auto* Self = static_cast<FImpl*>(Context->GetUserData());
+        auto* Result = new (Call->GetAddressOfReturnLocation()) std::string();
+        const auto& Action = *static_cast<const std::string*>(Call->GetArgObject(0));
+        auto* Mission = AngelIO::GetScriptMission();
+        auto* World = AngelIO::GetScriptWorld();
+        if (!Self || !Mission || !World || !Mission->GetOwner()->HasAuthority() || World->GetNetMode() == NM_Client ||
+            Action.empty() || Action.size() > 128 || Action.find('\0') != std::string::npos)
+        {
+            Context->SetException("RecordOnce requires an authoritative mission and a 1..128 byte action key");
+            return;
+        }
+        FGuid Id;
+        FString Error;
+        if (!World->GetSubsystem<UAngelIOCheckpointSubsystem>()->RecordOnce(*Mission, Self->ScriptSection, UTF8_TO_TCHAR(Action.c_str()), Id, Error))
+            Context->SetException(TCHAR_TO_UTF8(*Error));
+        else Result->assign(TCHAR_TO_UTF8(*Id.ToString(EGuidFormats::DigitsWithHyphensLower)));
+    }
 
     // Give the public functions the enum types declared by this mission. Use the
     // SDK tokenizer so comments, strings and enums inside namespaces stay local.
@@ -902,6 +927,8 @@ bool FAngelIOProgram::FImpl::RegisterAPI(FAngelIOModuleBindings& Bindings)
         Engine->RegisterGlobalFunction("void WaitSeconds(float seconds)", asFUNCTION(FImpl::WaitSeconds), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("string LoadCheckpoint(int version = 1)", asFUNCTION(FImpl::LoadCheckpoint), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("string RequireCheckpoint(int version = 1)", asFUNCTION(FImpl::RequireCheckpoint), asCALL_GENERIC) < 0 ||
+        Engine->RegisterGlobalFunction("string RecordOnce(const string &in action)", asFUNCTION(FImpl::RecordOnce), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("void SaveCheckpoint(const string &in stage, int version = 1)", asFUNCTION(FImpl::SaveCheckpoint), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("int SignalValue()", asFUNCTION(FImpl::SignalValue), asCALL_GENERIC) < 0)
         return Fail(TEXT("Could not register AngelIO script API"));
