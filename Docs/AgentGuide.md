@@ -244,6 +244,7 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Performance.SharedRegistration` | Paired source builds with one registered engine per mission or per batch of 1000 missions |
 | `AngelIO.Performance.WorldBytecode` | Six alternating pairs of 1000 component starts on fresh world engines, compiling from source or reusing debug bytecode |
 | `AngelIO.Network.ListenServer.StreamedBytecode` | Runtime cache hits, bounded LRU eviction, fresh missions and replicated client state after a full unload and return |
+| `AngelIO.Network.ListenServer.EndOnCase` | A connected client sees both branch counters advance after lowercase `cancel`. After exact `Cancel`, only the sibling counter advances. |
 | `AngelIO.Missions.RuntimeBytecodeBudget` | Per-world settings, LRU order, oversized bypass and source revisions on the runtime path |
 | `AngelIO.Missions.BytecodeCacheRevisions` | Source and wrapper edits rebuild the cached label and a failed edit preserves its last usable revision |
 | `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |

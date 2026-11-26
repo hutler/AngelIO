@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 16,
-  "VersionName": "0.10.0",
+  "Version": 17,
+  "VersionName": "0.10.1",
   "FriendlyName": "AngelIO",
   "Description": "AngelScript level scripting for Unreal Engine",
   "Category": "Scripting",

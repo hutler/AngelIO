@@ -68,6 +68,8 @@ The playable version takes the floor and speed from the player's command. It pub
 
 `Fork(Blink)` starts a child function with its own execution context and shared mission globals. A child can call `EndOn(InputSignal::RideEnded)` and `WaitSeconds(0.1f)` to blink a panel while its parent awaits a ride. The parent calls `Notify(InputSignal::RideEnded)` at arrival. Notifications are delivered after the current script slice. Cancellation takes precedence over a matching signal wait in that branch. Returning from a function started with `Fork` ends its descendants. Ending the mission or unloading the room releases all remaining branches. The PIE inspector lists each child function, source line and wait. [Blinking panel mission](Content/AngelIO/Examples/BlinkPanel.as)
 
+`EndOn` matches the exact spelling of an input signal, just like `WaitFor`. For a branch subscribed to `Cancel`, sending `cancel` leaves it running. Sending `Cancel` ends that branch and its descendants.
+
 A successful `FindLift("FreightLift")` binds its handle to that particular actor. Renaming the endpoint changes subsequent lookups. The stored handle still calls the original lift. After its destruction, calling `MoveTo` on the stored handle yields `Cancelled` with trace reason `TargetGone`. Look up the name again to use a replacement.
 
 ### Stream a room containing a lift

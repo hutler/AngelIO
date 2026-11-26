@@ -17,6 +17,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "HAL/FileManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
@@ -919,6 +920,82 @@ bool FAngelIOPartitionListen::RunTest(const FString&)
             if (!FMath::IsNearlyEqual(FindLift(World, 2)->GetActorLocation().Z, 700.0, 1.0)) return false;
         }
         return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOEndOnCase, "AngelIO.Network.ListenServer.EndOnCase",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOEndOnCase::RunTest(const FString&)
+{
+    if (!TestNull(TEXT("PIE must be idle"), GEditor->PlayWorld.Get())) return false;
+    StartListenSession();
+    const auto Steps = ListenSteps(this);
+    auto Panel = [](ENetMode Mode) -> UAngelIOScriptComponent*
+    {
+        const auto* Lift = FindLift(FindPeer(Mode), 2);
+        return Lift ? Lift->Address.Get() : nullptr;
+    };
+    Steps(TEXT("start two pulse counters on the replicated panel"), [this, Panel]
+    {
+        auto* Host = Panel(NM_ListenServer);
+        if (!Host || !Panel(NM_Client)) return false;
+        const FString Script = TEXT("EndOnCase-") + FGuid::NewGuid().ToString() + TEXT(".as");
+        const FString Path = FPaths::ProjectContentDir() / TEXT("AngelIO") / Script;
+        const TCHAR* Source = TEXT(R"(
+enum InputSignal { Cancel, cancel, Pulse, Done }
+int out_Guarded;
+int out_Sibling;
+void Guarded() {
+    EndOn(InputSignal::Cancel);
+    while (true) { WaitFor(InputSignal::Pulse); out_Guarded++; }
+}
+void Sibling() {
+    while (true) { WaitFor(InputSignal::Pulse); out_Sibling++; }
+}
+void Run() {
+    Fork(Guarded);
+    Fork(Sibling);
+    WaitFor(InputSignal::Done);
+}
+)");
+        if (!TestTrue(TEXT("Write isolated mission fixture"), FFileHelper::SaveStringToFile(Source, *Path))) return true;
+        ON_SCOPE_EXIT { IFileManager::Get().Delete(*Path); };
+        Host->Script = Script;
+        TestTrue(TEXT("Both branches start and receive their first pulse"), Host->StartScript() && Host->SendSignal(TEXT("Pulse"), 0));
+        return true;
+    });
+    Steps(TEXT("lowercase cancel leaves the guarded branch running"), [this, Panel]
+    {
+        auto* Client = Panel(NM_Client);
+        if (!TripOutput(Client, TEXT("Guarded"), 1) || !TripOutput(Client, TEXT("Sibling"), 1)) return false;
+        auto* Host = Panel(NM_ListenServer);
+        if (!TestNotNull(TEXT("Host panel after first pulse"), Host)) return true;
+        TestFalse(TEXT("WaitFor ignores a differently cased pulse"), Host->SendSignal(TEXT("pulse"), 0));
+        TestFalse(TEXT("EndOn(Cancel) ignores lowercase cancel"), Host->SendSignal(TEXT("cancel"), 0));
+        TestTrue(TEXT("Both branches process the next pulse"), Host->SendSignal(TEXT("Pulse"), 0) &&
+            TripOutput(Host, TEXT("Guarded"), 2) && TripOutput(Host, TEXT("Sibling"), 2));
+        return true;
+    });
+    Steps(TEXT("exact Cancel ends only the subscribed branch"), [this, Panel]
+    {
+        auto* Client = Panel(NM_Client);
+        if (!TripOutput(Client, TEXT("Guarded"), 2) || !TripOutput(Client, TEXT("Sibling"), 2)) return false;
+        auto* Host = Panel(NM_ListenServer);
+        if (!TestNotNull(TEXT("Host panel after lowercase cancel"), Host)) return true;
+        TestTrue(TEXT("Exact Cancel is consumed"), Host->SendSignal(TEXT("Cancel"), 0));
+        TestFalse(TEXT("Completed branch has no remaining subscription"), Host->SendSignal(TEXT("Cancel"), 0));
+        TestTrue(TEXT("Sibling alone processes the final pulse"), Host->SendSignal(TEXT("Pulse"), 0) &&
+            TripOutput(Host, TEXT("Guarded"), 2) && TripOutput(Host, TEXT("Sibling"), 3));
+        return true;
+    });
+    Steps(TEXT("client observes the stopped and surviving counters"), [Panel]
+    {
+        auto* Client = Panel(NM_Client);
+        return TripOutput(Client, TEXT("Guarded"), 2) && TripOutput(Client, TEXT("Sibling"), 3) &&
+            Client->GetWaitingSignal().Equals(TEXT("Done"), ESearchCase::CaseSensitive);
     });
     EndListenSession();
     return true;

@@ -10,6 +10,7 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Features/IModularFeatures.h"
+#include "Misc/Crc.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
@@ -447,7 +448,12 @@ struct FAngelIOProgram::FImpl
     FImpl* Root = nullptr;
     int32 ChildCount = 0;
     TArray<TSharedPtr<FImpl>> Children;
-    TSet<FString> EndSignals;
+    struct FSignalNameKeyFuncs : DefaultKeyFuncs<FString>
+    {
+        static bool Matches(const FString& A, const FString& B) { return A.Equals(B, ESearchCase::CaseSensitive); }
+        static uint32 GetKeyHash(const FString& Name) { return FCrc::StrCrc32(*Name); }
+    };
+    TSet<FString, FSignalNameKeyFuncs> EndSignals;
     FString BranchName;
 
     TArray<FAngelIOEvent>& EventQueue() { return Root ? Root->Events : Events; }
