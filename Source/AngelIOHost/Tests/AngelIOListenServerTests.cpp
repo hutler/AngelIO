@@ -3,6 +3,8 @@
 #include "../AngelIOExampleLift.h"
 #include "../AngelIOLiftTrip.h"
 #include "../AngelIOPlayerController.h"
+#include "../AngelIORoomDoor.h"
+#include "../AngelIORoomTerminal.h"
 #include "AngelIOScriptAPI.h"
 #include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptComponent.h"
@@ -23,6 +25,8 @@
 #include "Editor.h"
 #include "Engine/Level.h"
 #include "Engine/LevelStreamingDynamic.h"
+#include "Components/StaticMeshComponent.h"
+#include "LevelInstance/LevelInstanceActor.h"
 #include "EngineUtils.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/Pawn.h"
@@ -136,6 +140,132 @@ UAngelIOScriptComponent* DeliveryPanel(ULevelStreamingDynamic* Room, int32 Start
             if (auto* Lift = Cast<AAngelIOExampleLift>(Actor); Lift && Lift->RequestedFloor == StartupFloor) return Lift->Address;
     return nullptr;
 }
+}
+
+namespace
+{
+struct FDoorRoomView
+{
+    TWeakObjectPtr<ALevelInstance> Instance;
+    TWeakObjectPtr<AAngelIORoomDoor> Door;
+    TWeakObjectPtr<AAngelIORoomTerminal> Terminal;
+
+    bool Find(UWorld* World, double X)
+    {
+        for (TActorIterator<ALevelInstance> It(World); It; ++It)
+        {
+            if (!FMath::IsNearlyEqual(It->GetActorLocation().X, X, 1.0)) continue;
+            Instance = *It;
+            if (ULevel* Room = It->GetLoadedLevel())
+                for (AActor* Actor : Room->Actors)
+                {
+                    if (auto* D = Cast<AAngelIORoomDoor>(Actor)) Door = D;
+                    if (auto* T = Cast<AAngelIORoomTerminal>(Actor)) Terminal = T;
+                }
+        }
+        return Door.IsValid() && Terminal.IsValid() && At(false);
+    }
+
+    bool At(bool bOpened) const
+    {
+        FAngelIOValue Result;
+        return Door.IsValid() && Terminal.IsValid() && Door->IsOpen() == bOpened &&
+            FMath::IsNearlyEqual(Door->Leaf->GetRelativeLocation().Z, bOpened ? 340.0 : 110.0, 0.01) &&
+            Terminal->Mission->GetWaitingSignal() == TEXT("Activate") &&
+            Terminal->Mission->GetOutput(TEXT("Opened"), Result) && Result.Boolean == bOpened;
+    }
+};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIODoorRooms, "AngelIO.Network.ListenServer.DoorRooms",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FAngelIODoorRooms::RunTest(const FString&)
+{
+    struct FSession
+    {
+        FDoorRoomView HostA, HostB, ClientA, ClientB;
+        TWeakObjectPtr<AAngelIORoomPlayerController> HostRemote, Client;
+        FAngelIOProgram HeldDoor;
+    };
+    auto S = MakeShared<FSession>();
+    StartListenSession(TEXT("/Game/Demo/TwoDoorRooms"));
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("both peers load two copies of DoorRoom and the remote player joins"), [this, S]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!Host || !Client) return false;
+        for (auto It = Host->GetPlayerControllerIterator(); It; ++It)
+            if (auto* PC = Cast<AAngelIORoomPlayerController>(It->Get()); PC && !PC->IsLocalController()) S->HostRemote = PC;
+        S->Client = Cast<AAngelIORoomPlayerController>(Client->GetFirstPlayerController());
+        if (!S->HostRemote.IsValid() || !S->HostRemote->GetPawn() || !S->Client.IsValid() ||
+            !S->Client->GetNetConnection() || !S->Client->GetPawn() ||
+            !S->HostA.Find(Host, 0) || !S->HostB.Find(Host, 850) ||
+            !S->ClientA.Find(Client, 0) || !S->ClientB.Find(Client, 850)) return false;
+        TestEqual(TEXT("One room asset"), S->HostA.Instance->GetWorldAsset(), S->HostB.Instance->GetWorldAsset());
+        TestEqual(TEXT("Both terminal instances use the same mission"), S->HostA.Terminal->Mission->Script, S->HostB.Terminal->Mission->Script);
+        FAngelIOProgram Unscoped;
+        FAngelIOValue Found;
+        TestTrue(TEXT("Unscoped duplicate names and missing names resolve to null"), Unscoped.Compile(TEXT("AmbiguousDoor.as"),
+            TEXT("bool out_Found; void Run() { out_Found = FindDoor(\"RoomDoor\") !is null || FindDoor(\"Missing\") !is null; }"), Host) &&
+            Unscoped.Start({}, Host) && Unscoped.GetOutput(TEXT("Found"), Found) && !Found.Boolean);
+        TestTrue(TEXT("Capture a typed handle from A before unloading"), S->HeldDoor.Compile(TEXT("HeldDoor.as"),
+            TEXT("enum InputSignal { Probe } bool out_Found; bool out_Rejected; void Run() { Door@ held = FindDoor(\"Door\"); ")
+            TEXT("out_Found = held !is null; WaitFor(InputSignal::Probe); DoorOpen@ request = held.Open(); ")
+            TEXT("request.Wait(); out_Rejected = !request.Opened; }"), Host) &&
+            S->HeldDoor.Start({}, Host, S->HostA.Terminal->Mission) && S->HeldDoor.GetOutput(TEXT("Found"), Found) && Found.Boolean);
+        return true;
+    });
+    Steps(TEXT("remote player uses A from within range"), [S]
+    {
+        if (!S->ClientA.Terminal->IsInReach(S->Client->GetPawn())) return false;
+        S->Client->ServerUseTerminal(S->ClientB.Terminal.Get()); // Same reliable channel, but out of reach.
+        S->Client->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("only A opens on the server and connected client"), [this, S]
+    {
+        if (!S->HostA.At(true) || !S->ClientA.At(true)) return false;
+        TestTrue(TEXT("Both peers still see B closed and waiting"), S->HostB.At(false) && S->ClientB.At(false));
+        AddInfo(TEXT("DoorRoom test: A opened on both peers, B stayed closed."));
+        return true;
+    });
+    Steps(TEXT("remote player walks across the walkway into reach of B on both peers"), [S]
+    {
+        if (!S->ClientB.Terminal->IsInReach(S->Client->GetPawn()))
+            S->Client->GetPawn()->AddMovementInput(FVector::ForwardVector, 1);
+        if (!S->HostB.Terminal->IsInReach(S->HostRemote->GetPawn()) ||
+            !S->ClientB.Terminal->IsInReach(S->Client->GetPawn())) return false;
+        S->HostA.Instance->UnloadLevelInstance();
+        S->ClientA.Instance->UnloadLevelInstance();
+        return true;
+    });
+    Steps(TEXT("A unloads and its saved handle cannot operate B"), [this, S]
+    {
+        if (S->HostA.Instance->GetLoadedLevel() || S->ClientA.Instance->GetLoadedLevel()) return false;
+        FAngelIOValue Rejected;
+        TestTrue(TEXT("B is the only registered door"), S->HostRemote->GetWorld()->GetSubsystem<UAngelIOTargetRegistry>()
+            ->FindUniqueActor(TEXT("RoomDoor"), AAngelIORoomDoor::StaticClass()) == S->HostB.Door.Get());
+        TestTrue(TEXT("The previous handle returns a failed DoorOpen"), S->HeldDoor.Signal(TEXT("Probe"), 0) &&
+            S->HeldDoor.GetOutput(TEXT("Rejected"), Rejected) && Rejected.Boolean);
+        TestTrue(TEXT("Original B terminal and door survived on both peers"), S->HostB.At(false) && S->ClientB.At(false));
+        return true;
+    });
+    Steps(TEXT("remote player uses the surviving B terminal"), [S]
+    {
+        if (!S->ClientB.Terminal->IsInReach(S->Client->GetPawn())) return false;
+        S->Client->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("B opens on both peers while A remains unloaded"), [this, S]
+    {
+        if (!S->HostB.At(true) || !S->ClientB.At(true)) return false;
+        TestTrue(TEXT("A remains unloaded"), !S->HostA.Instance->GetLoadedLevel() && !S->ClientA.Instance->GetLoadedLevel());
+        AddInfo(TEXT("DoorRoom test: B opened on both peers after A unloaded."));
+        return true;
+    });
+    EndListenSession();
+    return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOListen, "AngelIO.Network.ListenServer.NamedGroupAndLateJoin",

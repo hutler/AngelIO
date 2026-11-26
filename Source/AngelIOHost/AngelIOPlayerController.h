@@ -5,6 +5,19 @@
 #include "AngelIOPlayerController.generated.h"
 
 class UAngelIOScriptComponent;
+class AAngelIORoomTerminal;
+
+UCLASS()
+class AAngelIORoomPlayerController : public APlayerController
+{
+    GENERATED_BODY()
+public:
+    void SetupInputComponent() override;
+    UFUNCTION(Exec)
+    void UseTerminal();
+    UFUNCTION(Server, Reliable, BlueprintCallable, Category="Demo")
+    void ServerUseTerminal(AAngelIORoomTerminal* Terminal);
+};
 
 UCLASS()
 class AAngelIOPlayerController : public APlayerController

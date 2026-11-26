@@ -1,6 +1,7 @@
 #include "Modules/ModuleManager.h"
 #include "AngelIOExampleLift.h"
 #include "AngelIOLiftTrip.h"
+#include "AngelIORoomDoor.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
 #include "Engine/World.h"
@@ -37,13 +38,22 @@ namespace
                 Engine.RegisterObjectBehaviour(Name, asBEHAVE_RELEASE, "void f()", asFUNCTION(Release), asCALL_GENERIC) >= 0;
         }
     };
-    struct FNamedLift
+    template<class TActor>
+    struct TNamedActor
     {
-        TWeakObjectPtr<AAngelIOExampleLift> Actor;
+        TWeakObjectPtr<TActor> Actor;
         FName Target;
         uint64 PlayGeneration;
+
+        TActor* Get() const
+        {
+            auto* Current = Actor.Get();
+            return Current && Current->GetPlayGeneration() == PlayGeneration ? Current : nullptr;
+        }
     };
-    using FLiftHandle = TScriptHandle<FNamedLift>;
+    using FLiftHandle = TScriptHandle<TNamedActor<AAngelIOExampleLift>>;
+    using FDoorHandle = TScriptHandle<TNamedActor<AAngelIORoomDoor>>;
+    using FDoorOpenHandle = TScriptHandle<TSharedRef<FDoorOpen>>;
     // Script TripStatus values 0..2 are producer results. Value 3 belongs to the waiter.
     constexpr asDWORD TimedOutResult = 3;
     struct FTripReference
@@ -60,14 +70,14 @@ namespace
         return UTF8_TO_TCHAR(Name.c_str());
     }
 
-    struct FLiftLookup
+    struct FActorLookup
     {
         FString Name;
         TWeakObjectPtr<ULevel> Room;
         bool bLocal = false;
     };
 
-    FLiftLookup LiftLookup(const FString& Name)
+    FActorLookup ActorLookup(const FString& Name)
     {
         if (auto* Mission = AngelIO::GetScriptMission())
             if (const FName* Bound = Mission->RoomTargets.Find(FName(*Name, FNAME_Find)))
@@ -75,11 +85,17 @@ namespace
         return {Name, nullptr, false};
     }
 
-    AAngelIOExampleLift* ResolveLift(UWorld* World, const FLiftLookup& Lookup, bool bRequireReady)
+    template<class TActor>
+    TActor* ResolveActor(UWorld* World, const FActorLookup& Lookup)
     {
         if (!World || Lookup.Name.IsEmpty() || (Lookup.bLocal && !Lookup.Room.IsValid())) return nullptr;
         auto* Registry = World->GetSubsystem<UAngelIOTargetRegistry>();
-        auto* Lift = Cast<AAngelIOExampleLift>(Registry->FindUniqueActor(FName(*Lookup.Name, FNAME_Find), AAngelIOExampleLift::StaticClass(), Lookup.Room.Get()));
+        return Cast<TActor>(Registry->FindUniqueActor(FName(*Lookup.Name, FNAME_Find), TActor::StaticClass(), Lookup.Room.Get()));
+    }
+
+    AAngelIOExampleLift* ResolveLift(UWorld* World, const FActorLookup& Lookup, bool bRequireReady)
+    {
+        auto* Lift = ResolveActor<AAngelIOExampleLift>(World, Lookup);
         if (Lift && bRequireReady && !Lift->IsReadyForTrip())
             return nullptr;
         return Lift;
@@ -88,7 +104,7 @@ namespace
     void ReturnLift(asIScriptGeneric* Call, bool bRequireReady)
     {
         const FString Name = ReadName(Call);
-        const auto Lookup = LiftLookup(Name);
+        const auto Lookup = ActorLookup(Name);
         auto* Lift = ResolveLift(AngelIO::GetScriptWorld(), Lookup, bRequireReady);
         Call->SetReturnAddress(Lift ? new FLiftHandle({Lift, FName(*Lookup.Name), Lift->GetPlayGeneration()}) : nullptr);
     }
@@ -106,27 +122,48 @@ namespace
         TOptional<double> Timeout;
         if (Call->GetArgCount() == 2) Timeout = Call->GetArgFloat(1);
         TWeakObjectPtr<UWorld> World = AngelIO::GetScriptWorld();
-        const auto Lookup = LiftLookup(Name);
+        const auto Lookup = ActorLookup(Name);
         AngelIO::AwaitCondition(TEXT("WaitActor"), Lookup.Name, Timeout,
             [World, Lookup] { return ResolveLift(World.Get(), Lookup, true) != nullptr; });
     }
 
-    AAngelIOExampleLift* GetCurrentLift(const FNamedLift& Handle)
+    void FindDoor(asIScriptGeneric* Call)
     {
-        auto* Lift = Handle.Actor.Get();
-        return Lift && Lift->GetPlayGeneration() == Handle.PlayGeneration ? Lift : nullptr;
+        const auto Lookup = ActorLookup(ReadName(Call));
+        auto* Door = ResolveActor<AAngelIORoomDoor>(AngelIO::GetScriptWorld(), Lookup);
+        Call->SetReturnAddress(Door ? new FDoorHandle({Door, FName(*Lookup.Name), Door->GetPlayGeneration()}) : nullptr);
+    }
+
+    void OpenDoor(asIScriptGeneric* Call)
+    {
+        const auto& Handle = static_cast<FDoorHandle*>(Call->GetObject())->Value;
+        auto* Door = Handle.Get();
+        auto Request = Door ? Door->Open(Handle.Target) :
+            MakeShared<FDoorOpen>(AngelIO::GetScriptWorld(), Handle.Target, nullptr);
+        if (!Door) Request->Finish(false, TEXT("TargetGone"));
+        Call->SetReturnAddress(new FDoorOpenHandle(Request));
+    }
+
+    void WaitForDoor(asIScriptGeneric* Call)
+    {
+        AngelIO::AwaitOperation(static_cast<FDoorOpenHandle*>(Call->GetObject())->Value, TEXT("DoorOpen.Wait"));
+    }
+
+    void DoorOpened(asIScriptGeneric* Call)
+    {
+        Call->SetReturnByte(static_cast<FDoorOpenHandle*>(Call->GetObject())->Value->bOpened);
     }
 
     void HasSavedArrival(asIScriptGeneric* Call)
     {
-        const auto* Lift = GetCurrentLift(static_cast<FLiftHandle*>(Call->GetObject())->Value);
+        const auto* Lift = static_cast<FLiftHandle*>(Call->GetObject())->Value.Get();
         Call->SetReturnByte(Lift && Lift->HasSavedArrival(static_cast<int32>(Call->GetArgDWord(0)), AngelIO::GetCheckpointStepId()));
     }
 
     void MoveLift(asIScriptGeneric* Call)
     {
         const auto& Handle = static_cast<FLiftHandle*>(Call->GetObject())->Value;
-        auto* Lift = GetCurrentLift(Handle);
+        auto* Lift = Handle.Get();
         const int32 Floor = static_cast<int32>(Call->GetArgDWord(0));
         const float Speed = Call->GetArgFloat(1);
         auto Trip = Lift ? Lift->MoveTo(Floor, Speed, Handle.Target, AngelIO::GetCheckpointStepId()) :
@@ -182,12 +219,18 @@ public:
     {
         Out.Add({TEXT("FindLift"), AAngelIOExampleLift::StaticClass(), true});
         Out.Add({TEXT("WaitActor"), AAngelIOExampleLift::StaticClass(), true});
+        Out.Add({TEXT("FindDoor"), AAngelIORoomDoor::StaticClass(), true});
     }
 #endif
 
     bool RegisterBindings(asIScriptEngine& Engine) override
     {
-        return FLiftHandle::Register(Engine, "Lift") && FTripHandle::Register(Engine, "LiftTrip") &&
+        return FDoorHandle::Register(Engine, "Door") && FDoorOpenHandle::Register(Engine, "DoorOpen") &&
+            Engine.RegisterGlobalFunction("Door@ FindDoor(const string &in name)", asFUNCTION(FindDoor), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("Door", "DoorOpen@ Open()", asFUNCTION(OpenDoor), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("DoorOpen", "void Wait()", asFUNCTION(WaitForDoor), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("DoorOpen", "bool get_Opened() const property", asFUNCTION(DoorOpened), asCALL_GENERIC) >= 0 &&
+            FLiftHandle::Register(Engine, "Lift") && FTripHandle::Register(Engine, "LiftTrip") &&
             FTripHandle::Register(Engine, "TripResult") && Engine.RegisterEnum("TripStatus") >= 0 &&
             Engine.RegisterEnumValue("TripStatus", "Arrived", int(ELiftTripStatus::Arrived)) >= 0 &&
             Engine.RegisterEnumValue("TripStatus", "Rejected", int(ELiftTripStatus::Rejected)) >= 0 &&

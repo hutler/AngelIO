@@ -3,6 +3,9 @@
 #include "AngelIOScriptComponent.h"
 #include "../AngelIOExampleLift.h"
 #include "../AngelIOPlayerController.h"
+#include "../AngelIORoomCharacter.h"
+#include "../AngelIORoomDoor.h"
+#include "../AngelIORoomTerminal.h"
 #include "GameFramework/WorldSettings.h"
 #include "Misc/AutomationTest.h"
 #include "Tests/AutomationCommon.h"
@@ -75,6 +78,33 @@ bool FAngelIOMapContract::RunTest(const FString&)
     const auto& Literals = Calls.LiteralTargets();
     TestTrue(TEXT("Only the direct group call is checked, with its original line"), Literals.Num() == 1 &&
         Literals[0].Name == TEXT("LiteralGroup") && Literals[0].Line == 10);
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIODoorRoomContract, "AngelIO.Editor.DoorRoomContracts",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIODoorRoomContract::RunTest(const FString&)
+{
+    FTestWorldWrapper Scene;
+    if (!Scene.CreateTestWorld(EWorldType::Game)) return false;
+    auto* World = Scene.GetTestWorld();
+    World->GetWorldSettings()->DefaultGameMode = AAngelIORoomGameMode::StaticClass();
+    auto* Terminal = World->SpawnActor<AAngelIORoomTerminal>();
+    if (!Terminal) return false;
+    const auto Missing = AngelIO::ValidateMap(*World);
+    const auto* MissingDoor = Missing.Diagnostics.FindByPredicate([&](const auto& D)
+        { return D.Component == Terminal->Mission && D.Field == TEXT("Door") && D.Code == TEXT("target_missing"); });
+    TestTrue(TEXT("A missing room door reports the lookup line"), MissingDoor && MissingDoor->Line > 0);
+    auto* First = World->SpawnActor<AAngelIORoomDoor>();
+    if (!First) return false;
+    TestTrue(TEXT("One local door satisfies the terminal contract"), AngelIO::ValidateMap(*World).IsValid());
+    auto* Second = World->SpawnActor<AAngelIORoomDoor>(FVector(400, 0, 0), FRotator::ZeroRotator);
+    if (!Second) return false;
+    const auto Ambiguous = AngelIO::ValidateMap(*World);
+    const auto* Duplicate = Ambiguous.Diagnostics.FindByPredicate([&](const auto& D)
+        { return D.Component == Terminal->Mission && D.Field == TEXT("Door") && D.Code == TEXT("target_ambiguous"); });
+    TestTrue(TEXT("Two matching local doors identify both actors and the source line"), Duplicate &&
+        Duplicate->Line > 0 && Duplicate->Message.Contains(First->GetPathName()) && Duplicate->Message.Contains(Second->GetPathName()));
     return true;
 }
 #endif

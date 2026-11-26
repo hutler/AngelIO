@@ -251,12 +251,23 @@ try {
   assert.equal(api.entry, "void Run()");
   assert(api.externalDeclarations.some(s => s.includes("Lift::MoveTo(int floor, float speed)")));
   assert(api.externalDeclarations.some(s => s.includes("Lift::HasSavedArrival(int floor)")));
+  assert(api.externalDeclarations.some(s => s.includes("Door@ FindDoor(")));
+  assert(api.externalDeclarations.some(s => s.includes("Door::Open()")));
+  assert(api.externalDeclarations.some(s => s.includes("DoorOpen::Wait()")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait()")));
   assert(api.externalDeclarations.some(s => s.includes("LiftTrip::Wait(float")));
   assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name)"));
   assert(api.externalDeclarations.includes("Lift@ WaitActor(const string &in name, float timeoutSeconds)"));
   assert(!api.externalDeclarations.some(s => s.includes("AngelIOInternal::")));
   assert((await call("validate_script", { script: "Examples/StreamedLift.as" })).structuredContent.valid);
+  const terminal = (await call("validate_script", { script: "Examples/DoorTerminal.as" })).structuredContent;
+  assert(terminal.valid && terminal.inputSignals.includes("Activate") &&
+    terminal.ports.some(p => p.name === "Opened" && p.type === "bool" && p.direction === "out"));
+  const room = (await call("validate_map", { map: "/Game/Demo/DoorRoom" })).structuredContent;
+  assert(room.valid && room.missionsChecked === 1, JSON.stringify(room));
+  const doorScene = (await call("describe_scene", { map: "/Game/Demo/DoorRoom" })).structuredContent;
+  assert(doorScene.components.some(c => c.script === "Examples/DoorTerminal.as" && c.roomTargets.Door === "RoomDoor"));
+  assert(doorScene.components.some(c => c.targetName === "RoomDoor"));
   assert(api.calls.some(s => s.startsWith("string LoadCheckpoint(")));
   assert(api.calls.some(s => s.startsWith("void SaveCheckpoint(")));
   const delivery = (await call("validate_script", { script: "Examples/RoomDelivery.as" })).structuredContent;

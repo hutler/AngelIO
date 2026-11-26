@@ -1,5 +1,10 @@
 #include "AngelIOPlayerController.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIORoomTerminal.h"
+#include "Components/InputComponent.h"
+#include "EngineUtils.h"
+#include "GameFramework/Pawn.h"
+#include "InputCoreTypes.h"
 
 AAngelIOPlayerController::AAngelIOPlayerController()
 {
@@ -12,6 +17,37 @@ AAngelIOPlayerController::AAngelIOPlayerController()
 AAngelIODemoGameMode::AAngelIODemoGameMode()
 {
     PlayerControllerClass = AAngelIOPlayerController::StaticClass();
+}
+
+void AAngelIORoomPlayerController::SetupInputComponent()
+{
+    Super::SetupInputComponent();
+    InputComponent->BindKey(EKeys::E, IE_Pressed, this, &AAngelIORoomPlayerController::UseTerminal);
+}
+
+void AAngelIORoomPlayerController::UseTerminal()
+{
+    const APawn* UserPawn = GetPawn();
+    if (!UserPawn) return;
+    AAngelIORoomTerminal* Closest = nullptr;
+    double BestDistance = TNumericLimits<double>::Max();
+    for (TActorIterator<AAngelIORoomTerminal> It(GetWorld()); It; ++It)
+    {
+        if (!It->IsInReach(UserPawn)) continue;
+        const double Distance = FVector::DistSquared(It->GetActorLocation(), UserPawn->GetActorLocation());
+        if (Distance < BestDistance)
+        {
+            Closest = *It;
+            BestDistance = Distance;
+        }
+    }
+    if (Closest) ServerUseTerminal(Closest);
+}
+
+void AAngelIORoomPlayerController::ServerUseTerminal_Implementation(AAngelIORoomTerminal* Terminal)
+{
+    if (IsValid(Terminal) && Terminal->IsInReach(GetPawn()))
+        Terminal->Mission->SendSignal(TEXT("Activate"), 0);
 }
 
 void AAngelIOPlayerController::ServerRequestLiftFloor_Implementation(int32 Floor)

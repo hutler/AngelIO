@@ -6,7 +6,7 @@ public class AngelIOHost : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "AngelIO" });
-        PrivateDependencyModuleNames.Add("Json");
+        PrivateDependencyModuleNames.AddRange(new[] { "Json", "InputCore" });
         if (Target.bBuildEditor)
             PrivateDependencyModuleNames.AddRange(new[] { "UnrealEd", "AngelIOEditor", "Slate", "SlateCore" });
     }

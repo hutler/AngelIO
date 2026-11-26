@@ -26,6 +26,12 @@ Once the platforms stop, try either command in the player console. Both work fro
 
 To change the initial ride, select a placed `AngelIOExampleLift` and edit **Requested Floor**. The `Mission` component's **Initial Inputs** accepts `StartingFloor` (int), `TravelSpeed` (float, in cm/s), and `Enabled` (bool). A Blueprint can request another ride with **Request Floor**.
 
+## Try the two-room terminal demo
+
+Open `/Game/Demo/TwoDoorRooms`, set **Play Net Mode** to **Play As Listen Server** with two players, and play in the client window. Use **WASD** and the mouse to approach a terminal. Press **E** (or enter `UseTerminal` in the player console) within 3 metres. The door beside that terminal rises on both screens. Cross the walkway and try the other terminal.
+
+Both rooms are instances of `/Game/Demo/DoorRoom`. Both terminals run the same mission and bind the role `Door` to a local endpoint named `RoomDoor`. The server checks the player's distance and the mission waits for its own opening operation before publishing `Opened`. Select a terminal in the PIE mission inspector to see the wait and its result. [Terminal mission](Content/AngelIO/Examples/DoorTerminal.as)
+
 ## Call a typed API and wait for a trip
 
 Select a placed script component and choose a mission from the **Script** dropdown. **Mission Contract** shows each compiled input and output, its type and its source initializer. Enter an input override or clear it to use the script default. For a literal target, choose a named endpoint in the room to bind that role to the current level instance. The same panel can then drive different lifts in two copies of a room. **Tools → Validate AngelIO Missions** checks missing and ambiguous bindings before PIE.

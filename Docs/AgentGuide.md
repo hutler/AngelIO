@@ -55,6 +55,14 @@ Set the logical `TargetName` on the component. Renaming the actor in the Outline
 - **One actor.** The `Address` components identify `FreightLift` and `ServiceLiftB`. `FindLift` returns a handle when exactly one distinct lift actor matches in the calling mission's world. Check for `null` before `MoveTo`. A cached handle still addresses that actor after a rename. Resolve again to address an actor that takes over its name.
 - **A group.** Both lifts' `Mission` components have `TargetName = DemoLifts`. `SendTo` delivers to the matching components. Use this for a broadcast such as a floor request. Use a typed trip handle when the caller needs a particular ride's result.
 
+### Open a door in a particular copy of a room
+
+Open `/Game/Demo/DoorRoom` to edit the template. Its terminal binds `RoomTargets["Door"]` to `RoomDoor`. The door's address component exports that name. `FindDoor("Door")` filters by the terminal's loaded level and native door class. A missing match or two matching doors in the same scope return `null`. When diagnosing a binding, run `validate_map` and `describe_scene` on the room template. [Terminal mission](../Content/AngelIO/Examples/DoorTerminal.as)
+
+In `/Game/Demo/TwoDoorRooms` both level instances use that template. On the client, **E** sends the nearest terminal to the server through the owning player controller. The server checks its pawn is within 300 cm before delivering `Activate`. The mission stores the handle from `door.Open()`, calls `Wait()`, then reads `Opened`. An in-progress opening completes when the leaf reaches the top. Calls during the same opening share its operation. Using an old door handle after unload returns a completed operation with `Opened == false` and trace reason `TargetGone`.
+
+Run `AngelIO.Network.ListenServer.DoorRooms` to exercise this path. The client uses terminal A, walks to B, then uses B after A unloads. The test reads both physical leaf positions and both terminals' published outputs, and checks a stored handle from A once B is the only registered door. [Listen-server test](../Source/AngelIOHost/Tests/AngelIOListenServerTests.cpp)
+
 ## Typed operations
 
 The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftTrip`, `TripResult`, `TripStatus`, the floor range, and the movement rules. A project that copies only `Plugins/AngelIO` supplies its own game provider. [Public extension interface](../Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Full binding implementation](../Source/AngelIOHost/AngelIOHost.cpp)
@@ -237,6 +245,7 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Compiler.Contract` | Compilation, public contract, diagnostics and runtime failure cases |
 | `AngelIO.Addressing.SpawnRenameDestroy` | Named group membership through spawn, rename and destruction |
 | `AngelIO.Editor.MapContracts` | Map-level script, input and name diagnostics including player-controller missions |
+| `AngelIO.Editor.DoorRoomContracts` | Valid room binding, missing door, and two local doors claiming the same name |
 | `AngelIO.Missions.` | Independent lift instances, overlapping typed operations and versioned checkpoint isolation |
 | `AngelIO.Network.ListenServer` | `NamedGroupAndLateJoin`, `TypedTrips`, `MissionInspector`, `SharedRegistrationInspector`, `HandleLifetimeAndTimeout`, `StreamedTrips`, `WaitActor`, `MissionCheckpoints`, `CheckpointRestart`, `MidRideRestart`, `LandedBeforeDeliveredRestart`, `BlinkBranches` and `PartitionLanding` using networked PIE |
 | `AngelIO.Performance.WaitingMissions` | Startup, process resident-memory growth and baseline/loaded frame time for 1, 100 and 1000 independently ticking mission components |
@@ -245,6 +254,7 @@ if ($editorExit -ne 0 -or !(Select-String -Path $log -SimpleMatch 'Test Complete
 | `AngelIO.Performance.WorldBytecode` | Six alternating pairs of 1000 component starts on fresh world engines, compiling from source or reusing debug bytecode |
 | `AngelIO.Network.ListenServer.StreamedBytecode` | Runtime cache hits, bounded LRU eviction, fresh missions and replicated client state after a full unload and return |
 | `AngelIO.Network.ListenServer.EndOnCase` | A connected client sees both branch counters advance after lowercase `cancel`. After exact `Cancel`, only the sibling counter advances. |
+| `AngelIO.Network.ListenServer.DoorRooms` | A client activates A, sees B stay closed, then opens B after streaming A out. |
 | `AngelIO.Missions.RuntimeBytecodeBudget` | Per-world settings, LRU order, oversized bypass and source revisions on the runtime path |
 | `AngelIO.Missions.BytecodeCacheRevisions` | Source and wrapper edits rebuild the cached label and a failed edit preserves its last usable revision |
 | `AngelIO.Missions.SharedRegistrationIsolation` | Independent globals, signals, wait locations and compiler diagnostics on a shared engine |
