@@ -49,6 +49,30 @@ int32 CheckMap(const FString& Map, const FString& Output, bool bDescribe)
     Root->SetNumberField(TEXT("missionsChecked"), Report.MissionsChecked);
     if (bDescribe)
     {
+        TArray<TSharedPtr<FJsonValue>> Roles;
+        for (const auto& Role : Report.Roles)
+        {
+            auto Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("component"), Role.Component);
+            Json->SetStringField(TEXT("role"), Role.Role);
+            Json->SetStringField(TEXT("endpoint"), Role.Endpoint);
+            Json->SetStringField(TEXT("function"), Role.Function);
+            Json->SetStringField(TEXT("expectedClass"), Role.ExpectedClass);
+            Json->SetStringField(TEXT("scope"), Role.bRoom ? TEXT("room") : TEXT("world"));
+            Json->SetStringField(TEXT("multiplicity"), Role.bSingle ? TEXT("one") : TEXT("group"));
+            Json->SetBoolField(TEXT("mayStream"), Role.bMayStream);
+            Json->SetNumberField(TEXT("line"), Role.Line);
+            auto ActorPaths = [](const TArray<FString>& Paths)
+            {
+                TArray<TSharedPtr<FJsonValue>> Values;
+                for (const auto& Path : Paths) Values.Add(MakeShared<FJsonValueString>(Path));
+                return Values;
+            };
+            Json->SetArrayField(TEXT("matches"), ActorPaths(Role.Matches));
+            Json->SetArrayField(TEXT("wrongClass"), ActorPaths(Role.WrongClass));
+            Roles.Add(MakeShared<FJsonValueObject>(Json));
+        }
+        Root->SetArrayField(TEXT("roles"), Roles);
         TArray<TSharedPtr<FJsonValue>> Actors, Components;
         for (const AActor* Actor : Report.Actors)
         {

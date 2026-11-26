@@ -21,6 +21,14 @@ struct ANGELIOEDITOR_API FAngelIOMapReport
     TArray<FAngelIOMapDiagnostic> Diagnostics;
     TArray<const AActor*> Actors;
     TArray<const UAngelIOScriptComponent*> Components;
+    struct FRole
+    {
+        FString Component, Role, Endpoint, Function, ExpectedClass;
+        int32 Line;
+        bool bRoom, bSingle, bMayStream;
+        TArray<FString> Matches, WrongClass;
+    };
+    TArray<FRole> Roles;
     bool IsValid() const;
 };
 

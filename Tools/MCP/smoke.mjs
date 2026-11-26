@@ -272,6 +272,10 @@ try {
   assert(fullDelivery.valid && ["Confirm", "Dispatch", "Retry"].every(name => fullDelivery.inputSignals.includes(name)));
   const deliveryRoom = (await call("describe_scene", { map: "/Game/Demo/DeliveryRoom" })).structuredContent;
   assert(deliveryRoom.valid && deliveryRoom.missionsChecked === 2, JSON.stringify(deliveryRoom.diagnostics));
+  for (const role of ["Door", "Lift"]) {
+    assert(deliveryRoom.roles.some(r => r.role === role && r.endpoint === "Room" + role &&
+      r.scope === "room" && r.multiplicity === "one" && !r.mayStream && r.matches.length === 1 && r.line > 0));
+  }
   assert(deliveryRoom.components.some(c => c.script === "Examples/TerminalDelivery.as" &&
     c.roomTargets.Door === "RoomDoor" && c.roomTargets.Lift === "RoomLift"));
   assert(api.calls.some(s => s.startsWith("string LoadCheckpoint(")));

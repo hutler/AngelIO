@@ -17,6 +17,8 @@ struct FAngelIOMapLookup
     FString Function;
     UClass* OwnerClass;
     bool bRequireSingleActor;
+    // Global waits may intentionally name a streamed actor. Explicit room bindings are checked locally.
+    bool bAllowUnloadedGlobal = false;
 };
 #endif
 

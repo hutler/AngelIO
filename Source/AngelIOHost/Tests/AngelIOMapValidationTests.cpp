@@ -95,9 +95,17 @@ bool FAngelIODoorRoomContract::RunTest(const FString&)
     const auto* MissingDoor = Missing.Diagnostics.FindByPredicate([&](const auto& D)
         { return D.Component == Terminal->Mission && D.Field == TEXT("Door") && D.Code == TEXT("target_missing"); });
     TestTrue(TEXT("A missing room door reports the lookup line"), MissingDoor && MissingDoor->Line > 0);
+    Terminal->Mission->SetTargetName(TEXT("RoomDoor"));
+    const auto Wrong = AngelIO::ValidateMap(*World);
+    TestTrue(TEXT("Wrong type has its own diagnostic, with the actor and expected class"), Wrong.Diagnostics.ContainsByPredicate(
+        [&](const auto& D) { return D.Code == TEXT("target_wrong_class") && D.Line > 0 &&
+            D.Message.Contains(Terminal->GetPathName()) && D.Message.Contains(AAngelIORoomDoor::StaticClass()->GetPathName()); }));
     auto* First = World->SpawnActor<AAngelIORoomDoor>();
     if (!First) return false;
-    TestTrue(TEXT("One local door satisfies the terminal contract"), AngelIO::ValidateMap(*World).IsValid());
+    const auto Healthy = AngelIO::ValidateMap(*World);
+    TestTrue(TEXT("One matching door plus a different actor class satisfies the local contract"), Healthy.IsValid() &&
+        Healthy.Roles.ContainsByPredicate([](const auto& R) { return R.Role == TEXT("Door") && R.bRoom &&
+            R.bSingle && !R.bMayStream && R.Matches.Num() == 1 && R.WrongClass.Num() == 1; }));
     auto* Second = World->SpawnActor<AAngelIORoomDoor>(FVector(400, 0, 0), FRotator::ZeroRotator);
     if (!Second) return false;
     const auto Ambiguous = AngelIO::ValidateMap(*World);

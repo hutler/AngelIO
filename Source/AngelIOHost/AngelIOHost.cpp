@@ -224,7 +224,7 @@ public:
     void GetMapLookups(TArray<FAngelIOMapLookup>& Out) const override
     {
         Out.Add({TEXT("FindLift"), AAngelIOExampleLift::StaticClass(), true});
-        Out.Add({TEXT("WaitActor"), AAngelIOExampleLift::StaticClass(), true});
+        Out.Add({TEXT("WaitActor"), AAngelIOExampleLift::StaticClass(), true, true});
         Out.Add({TEXT("FindDoor"), AAngelIORoomDoor::StaticClass(), true});
     }
 #endif

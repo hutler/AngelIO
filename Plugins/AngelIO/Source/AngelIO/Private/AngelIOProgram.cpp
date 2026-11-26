@@ -428,7 +428,7 @@ struct FAngelIOProgram::FImpl
                     if (Function.Text != std::string_view(Name.Get(), Name.Length())) continue;
                     const FUTF8ToTCHAR Target(Literal.data() + 1, static_cast<int32>(Literal.size() - 2));
                     LiteralTargets.Add({Lookup.Function, FString(Target.Length(), Target.Get()),
-                        Lookup.OwnerClass, Lookup.bRequireSingleActor, Function.Line});
+                        Lookup.OwnerClass, Lookup.bRequireSingleActor, Function.Line, Lookup.bAllowUnloadedGlobal});
                 }
             }
             Before = Function;

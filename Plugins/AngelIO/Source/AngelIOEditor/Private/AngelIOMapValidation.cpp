@@ -105,24 +105,32 @@ FAngelIOMapReport AngelIO::ValidateMap(UWorld& World)
         }
         for (const auto& Target : Program->LiteralTargets())
         {
-            TArray<FString> Matches;
             const FName Alias(*Target.Name, FNAME_Find);
             const FName* Bound = Mission->RoomTargets.Find(Alias);
+            const FName Endpoint = Bound ? *Bound : Alias;
+            auto& Role = Report.Roles.Add_GetRef({Mission->GetPathName(), Target.Name, Bound ? Bound->ToString() : Target.Name,
+                Target.Function, Target.OwnerClass ? Target.OwnerClass->GetPathName() : AActor::StaticClass()->GetPathName(),
+                Target.Line, Bound != nullptr, Target.bRequireSingleActor, !Bound && Target.bAllowUnloadedGlobal, {}, {}});
             if (Target.Name.Len() < NAME_SIZE)
-                if (const auto* Actors = Targets.Find(Bound ? *Bound : Alias))
+                if (const auto* Actors = Targets.Find(Endpoint))
                     for (const auto* Actor : *Actors)
-                        if ((!Bound || (Mission->GetOwner() && Actor->GetLevel() == Mission->GetOwner()->GetLevel())) &&
-                            (!Target.OwnerClass || Actor->IsA(Target.OwnerClass))) Matches.Add(Actor->GetPathName());
-            // A global WaitActor can intentionally name an unloaded room.
-            if (!Bound && Target.Function == TEXT("WaitActor") && Matches.IsEmpty()) continue;
-            if (Matches.IsEmpty())
+                    {
+                        if (Bound && (!Mission->GetOwner() || Actor->GetLevel() != Mission->GetOwner()->GetLevel())) continue;
+                        auto& List = !Target.OwnerClass || Actor->IsA(Target.OwnerClass) ? Role.Matches : Role.WrongClass;
+                        List.Add(Actor->GetPathName());
+                    }
+            Role.Matches.Sort();
+            Role.WrongClass.Sort();
+            if (Role.Matches.IsEmpty() && !Role.WrongClass.IsEmpty())
+                Error(TEXT("target_wrong_class"), Target.Name, FString::Printf(TEXT("Endpoint '%s' requires %s. Incompatible actors: %s"),
+                    *Role.Endpoint, *Role.ExpectedClass, *FString::Join(Role.WrongClass, TEXT(", "))), Target.Line);
+            else if (Role.Matches.IsEmpty() && !Role.bMayStream)
                 Error(TEXT("target_missing"), Target.Name, FString::Printf(TEXT("%s('%s') has no matching placed actor."),
                     *Target.Function, *Target.Name), Target.Line);
-            else if (Target.bRequireSingleActor && Matches.Num() > 1)
+            else if (Target.bRequireSingleActor && Role.Matches.Num() > 1)
             {
-                Matches.Sort();
                 Error(TEXT("target_ambiguous"), Target.Name, FString::Printf(TEXT("%s('%s') matches multiple actors: %s"),
-                    *Target.Function, *Target.Name, *FString::Join(Matches, TEXT(", "))), Target.Line);
+                    *Target.Function, *Target.Name, *FString::Join(Role.Matches, TEXT(", "))), Target.Line);
             }
         }
     }

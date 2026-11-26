@@ -65,6 +65,7 @@ struct FAngelIOLiteralTarget
     UClass* OwnerClass;
     bool bRequireSingleActor;
     int32 Line;
+    bool bAllowUnloadedGlobal = false;
 };
 
 struct FAngelIOInspectedInteger
