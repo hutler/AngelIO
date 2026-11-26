@@ -41,13 +41,17 @@ void AAngelIORoomPlayerController::UseTerminal()
             BestDistance = Distance;
         }
     }
-    if (Closest) ServerUseTerminal(Closest);
+    if (Closest) ServerUseTerminal(Closest, FName(*Closest->Mission->GetWaitingSignal()));
 }
 
-void AAngelIORoomPlayerController::ServerUseTerminal_Implementation(AAngelIORoomTerminal* Terminal)
+void AAngelIORoomPlayerController::ServerUseTerminal_Implementation(AAngelIORoomTerminal* Terminal, FName ExpectedInput)
 {
-    if (IsValid(Terminal) && Terminal->IsInReach(GetPawn()))
-        Terminal->Mission->SendSignal(TEXT("Activate"), 0);
+    if (!IsValid(Terminal) || !Terminal->IsInReach(GetPawn())) return;
+    const FString Waiting = Terminal->Mission->GetWaitingSignal();
+    if (ExpectedInput.IsNone()) ExpectedInput = TEXT("Activate"); // Original single-action terminal.
+    if (ExpectedInput == FName(*Waiting) && (Waiting == TEXT("Activate") || Waiting == TEXT("Dispatch") ||
+        Waiting == TEXT("Retry") || Waiting == TEXT("Confirm")))
+        Terminal->Mission->SendSignal(Waiting, 0);
 }
 
 void AAngelIOPlayerController::ServerRequestLiftFloor_Implementation(int32 Floor)

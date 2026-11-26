@@ -65,6 +65,21 @@ Run `AngelIO.Network.ListenServer.DoorRooms` to exercise this path. The client u
 
 ## Typed operations
 
+### Recover a two-room delivery
+
+The two instances in `/Game/Demo/TwoDeliveryRooms` share `/Game/Demo/DeliveryRoom`. The terminal binds `Door` and `Lift` locally. Keep **Persist Open** on the door, **Persist Landing** on the lift and **Request On Start** off. The three script inputs are `Floor`, `Speed` and `Timeout`. Keep the configuration fixed for the lifetime of a dispatch. [TerminalDelivery.as](../Content/AngelIO/Examples/TerminalDelivery.as)
+
+| Saved checkpoint | Recovery on the server |
+| --- | --- |
+| Opening | Read the door's persisted open state. Open a closed door and wait for completion. |
+| Dispatched | Wait for the local lift. A landing receipt for this checkpoint step and floor fulfills the trip. |
+| Delivered | Publish phase 3 and accept Confirm. The cab and the door restore their physical state independently. |
+| Complete | Publish phase 4. The room has completed its delivery. |
+
+On the client, `Phase` is 0 (ready), 1 (opening), 2 (riding), 3 (awaiting confirmation), 4 (complete) or 5 (awaiting retry). In phase 5, `Failure` distinguishes a missing door (1), failed opening (2), unavailable lift (3), ride timeout (4) and rejected or cancelled ride (5). The indicator is a replicated mission output. The player controller sends the input observed by the client and the server checks both proximity and the current wait.
+
+Run `AngelIO.Network.ListenServer.TwoRoomDelivery` for room streaming, an independent concurrent B mission and late join. Run `AngelIO.Network.ListenServer.DeliveryRecovery` for reader timeout and fresh listen worlds on either side of the door and lift commits. Each restart uses its own disk slot.
+
 The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftTrip`, `TripResult`, `TripStatus`, the floor range, and the movement rules. A project that copies only `Plugins/AngelIO` supplies its own game provider. [Public extension interface](../Plugins/AngelIO/Source/AngelIO/Public/AngelIOScriptAPI.h) · [Full binding implementation](../Source/AngelIOHost/AngelIOHost.cpp)
 
 1. Add `AngelIO` to the game's module dependencies. Implement `IAngelIOScriptAPI::RegisterBindings(asIScriptEngine&)`. Register the provider with `IModularFeatures` in `StartupModule` before the first mission compiles. Keep it loaded until all consuming worlds and private validation programs have shut down, then unregister it in `ShutdownModule`.

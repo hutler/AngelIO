@@ -26,6 +26,7 @@
 #include "Engine/Level.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "LevelInstance/LevelInstanceActor.h"
 #include "EngineUtils.h"
 #include "GameFramework/WorldSettings.h"
@@ -149,9 +150,11 @@ struct FDoorRoomView
     TWeakObjectPtr<ALevelInstance> Instance;
     TWeakObjectPtr<AAngelIORoomDoor> Door;
     TWeakObjectPtr<AAngelIORoomTerminal> Terminal;
+    TWeakObjectPtr<AAngelIOExampleLift> Lift;
 
-    bool Find(UWorld* World, double X)
+    bool Resolve(UWorld* World, double X)
     {
+        if (!World) return false;
         for (TActorIterator<ALevelInstance> It(World); It; ++It)
         {
             if (!FMath::IsNearlyEqual(It->GetActorLocation().X, X, 1.0)) continue;
@@ -161,9 +164,25 @@ struct FDoorRoomView
                 {
                     if (auto* D = Cast<AAngelIORoomDoor>(Actor)) Door = D;
                     if (auto* T = Cast<AAngelIORoomTerminal>(Actor)) Terminal = T;
+                    if (auto* L = Cast<AAngelIOExampleLift>(Actor)) Lift = L;
                 }
+            return It->GetLoadedLevel() && Door.IsValid() && Terminal.IsValid();
         }
-        return Door.IsValid() && Terminal.IsValid() && At(false);
+        return false;
+    }
+
+    bool Find(UWorld* World, double X) { return Resolve(World, X) && At(false); }
+
+    bool DeliveryAt(int32 Phase, FString Wait, int32 Floor, int32 Trips) const
+    {
+        if (!Terminal.IsValid() || !Lift.IsValid() || !Door.IsValid()) return false;
+        FAngelIOValue Lamp;
+        const bool Open = Phase != 0;
+        return Terminal->Mission->GetWaitingSignal() == Wait && TripOutput(Terminal->Mission, TEXT("Phase"), Phase) &&
+            TripOutput(Lift->Mission, TEXT("LastFloor"), Floor) && TripOutput(Lift->Mission, TEXT("TotalTrips"), Trips) &&
+            Door->IsOpen() == Open && FMath::IsNearlyEqual(Door->Leaf->GetRelativeLocation().Z, Open ? 340.0 : 110.0, 0.1) &&
+            FMath::IsNearlyEqual(Lift->GetActorLocation().Z, 10.0 + 200.0 * (Floor - 1), 1.0) &&
+            Terminal->Mission->GetOutput(TEXT("Lamp"), Lamp) && !Lamp.Boolean && !Terminal->Lamp->IsVisible();
     }
 
     bool At(bool bOpened) const
@@ -265,6 +284,247 @@ bool FAngelIODoorRooms::RunTest(const FString&)
         return true;
     });
     EndListenSession();
+    return true;
+}
+
+namespace
+{
+int32 DeliveryCalls(UWorld* World, const TCHAR* Operation)
+{
+    int32 Count = 0;
+    World->GetSubsystem<UAngelIOTraceSubsystem>()->VisitEvents([&](const FJsonObject& E, const UObject*)
+    {
+        FString Name;
+        if (E.TryGetStringField(TEXT("operation"), Name) && Name == Operation) ++Count;
+    });
+    return Count;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIOTwoRoomDelivery, "AngelIO.Network.ListenServer.TwoRoomDelivery",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
+{
+    struct FSession
+    {
+        FDoorRoomView A, B, ClientA, ClientB;
+        TWeakObjectPtr<AAngelIORoomPlayerController> Player;
+        TWeakObjectPtr<APawn> RemotePawn;
+        FGuid ARun, BRun, ACheckpoint;
+        TStrongObjectPtr<UAngelIOTestSignalObserver> ClientMotion{NewObject<UAngelIOTestSignalObserver>()};
+        bool Approached(const FDoorRoomView& Room, float Direction) const
+        {
+            const auto& ServerRoom = Direction > 0 ? B : A;
+            if (Room.Terminal->IsInReach(Player->GetPawn()) && ServerRoom.Terminal->IsInReach(RemotePawn.Get())) return true;
+            Player->GetPawn()->AddMovementInput(FVector::ForwardVector, Direction);
+            return false;
+        }
+    };
+    const auto S = MakeShared<FSession>();
+    StartListenSession(TEXT("/Game/Demo/TwoDeliveryRooms"));
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("both instances start independently on both peers"), [S]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!S->A.Resolve(Host, 0) || !S->B.Resolve(Host, 850) || !S->ClientA.Resolve(Client, 0) ||
+            !S->ClientB.Resolve(Client, 850)) return false;
+        for (auto* Room : {&S->A, &S->B, &S->ClientA, &S->ClientB})
+            if (!Room->DeliveryAt(0, TEXT("Dispatch"), 1, 0)) return false;
+        S->Player = Cast<AAngelIORoomPlayerController>(Client->GetFirstPlayerController());
+        for (auto It = Host->GetPlayerControllerIterator(); It; ++It)
+            if (auto* PC = It->Get(); PC && !PC->IsLocalController()) S->RemotePawn = PC->GetPawn();
+        if (!S->RemotePawn.IsValid() || !S->Player.IsValid() || !S->ClientA.Terminal->IsInReach(S->Player->GetPawn())) return false;
+        S->ARun = S->A.Terminal->Mission->InspectMission().Instance;
+        S->BRun = S->B.Terminal->Mission->InspectMission().Instance;
+        Observe(S->ClientA.Lift->Mission, S->ClientMotion.Get());
+        S->Player->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("client sees the active lamp and A delivery arrives exactly once"), [S]
+    {
+        return S->ClientA.Terminal->Lamp->IsVisible();
+    });
+    Steps(TEXT("A awaits confirmation; B still awaits dispatch"), [this, S]
+    {
+        if (!S->A.DeliveryAt(3, TEXT("Confirm"), 4, 1) || !S->ClientA.DeliveryAt(3, TEXT("Confirm"), 4, 1) ||
+            S->ClientMotion->Presentations != 1) return false;
+        TestTrue(TEXT("B is untouched on both peers"), S->B.DeliveryAt(0, TEXT("Dispatch"), 1, 0) &&
+            S->ClientB.DeliveryAt(0, TEXT("Dispatch"), 1, 0));
+        S->ACheckpoint = S->A.Terminal->Mission->InspectMission().CheckpointId;
+        return true;
+    });
+    Steps(TEXT("walk to B and unload A"), [S]
+    {
+        if (!S->Approached(S->ClientB, 1)) return false;
+        S->A.Instance->UnloadLevelInstance();
+        S->ClientA.Instance->UnloadLevelInstance();
+        return true;
+    });
+    Steps(TEXT("dispatch B from the connected client while A is absent"), [S]
+    {
+        if (S->A.Instance->GetLoadedLevel() || S->ClientA.Instance->GetLoadedLevel()) return false;
+        S->Player->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("reload A while B has an active ride"), [S]
+    {
+        if (S->B.Terminal->Mission->GetWaitingSignal() != TEXT("LiftTrip.Wait")) return false;
+        S->A.Instance->LoadLevelInstance();
+        S->ClientA.Instance->LoadLevelInstance();
+        return true;
+    });
+    Steps(TEXT("A resumes Delivered with floor 4 and zero new trips; B finishes in its original run"), [this, S]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        if (!S->A.Resolve(Host, 0) || !S->ClientA.Resolve(S->Player->GetWorld(), 0) ||
+            !S->A.DeliveryAt(3, TEXT("Confirm"), 4, 0) || !S->ClientA.DeliveryAt(3, TEXT("Confirm"), 4, 0) ||
+            !S->B.DeliveryAt(3, TEXT("Confirm"), 4, 1) || !S->ClientB.DeliveryAt(3, TEXT("Confirm"), 4, 1)) return false;
+        const auto A = S->A.Terminal->Mission->InspectMission();
+        const auto B = S->B.Terminal->Mission->InspectMission();
+        TestEqual(TEXT("A reads its Delivered checkpoint"), A.RestoredStage, FString(TEXT("Delivered")));
+        TestTrue(TEXT("Replacement VM retains A's checkpoint"), A.Instance != S->ARun && A.CheckpointId == S->ACheckpoint && A.CheckpointId.IsValid());
+        TestTrue(TEXT("B keeps its original VM and independent checkpoint"), B.Instance == S->BRun && B.CheckpointId != A.CheckpointId);
+        TestEqual(TEXT("Each delivery issued exactly one MoveTo"), DeliveryCalls(Host, TEXT("Lift.MoveTo")), 2);
+        TestEqual(TEXT("Each door was opened once"), DeliveryCalls(Host, TEXT("Door.Open")), 2);
+        GEditor->RequestLateJoin();
+        return true;
+    });
+    Steps(TEXT("late client sees both restored physical and mission states"), [S]
+    {
+        auto* Late = FindPeer(NM_Client, S->Player->GetWorld());
+        FDoorRoomView A, B;
+        if (!A.Resolve(Late, 0) || !B.Resolve(Late, 850) || !A.DeliveryAt(3, TEXT("Confirm"), 4, 0) ||
+            !B.DeliveryAt(3, TEXT("Confirm"), 4, 1)) return false;
+        S->Player->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("confirm B, then walk back and confirm the restored A mission"), [S]
+    {
+        if (!S->ClientB.DeliveryAt(4, TEXT(""), 4, 1) || !S->Approached(S->ClientA, -1)) return false;
+        S->Player->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("both rooms complete with only their original deliveries"), [this, S]
+    {
+        if (!S->ClientA.DeliveryAt(4, TEXT(""), 4, 0) || !S->A.DeliveryAt(4, TEXT(""), 4, 0)) return false;
+        TestEqual(TEXT("Confirmation never issues another ride"), DeliveryCalls(FindPeer(NM_ListenServer), TEXT("Lift.MoveTo")), 2);
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FAngelIODeliveryRecovery, "AngelIO.Network.ListenServer.DeliveryRecovery",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+void FAngelIODeliveryRecovery::GetTests(TArray<FString>& Names, TArray<FString>& Commands) const
+{
+    for (const TCHAR* Case : {TEXT("DoorInFlight"), TEXT("DoorCommitted"), TEXT("RideInFlight"), TEXT("LandingCommitted"), TEXT("TimeoutRetry")})
+    {
+        Names.Add(Case);
+        Commands.Add(Case);
+    }
+}
+bool FAngelIODeliveryRecovery::RunTest(const FString& Case)
+{
+    struct FSession
+    {
+        FDoorRoomView A, ClientA;
+        TWeakObjectPtr<AAngelIORoomPlayerController> Player;
+        bool Connect()
+        {
+            auto* Client = FindPeer(NM_Client);
+            if (!A.Resolve(FindPeer(NM_ListenServer), 0) || !ClientA.Resolve(Client, 0)) return false;
+            Player = Cast<AAngelIORoomPlayerController>(Client->GetFirstPlayerController());
+            return Player.IsValid() && ClientA.Terminal->IsInReach(Player->GetPawn());
+        }
+    };
+    auto S = MakeShared<FSession>();
+    const auto Steps = ListenSteps(this);
+    const bool bDoor = Case.StartsWith(TEXT("Door"));
+    const bool bCommitted = Case.EndsWith(TEXT("Committed"));
+    const bool bTimeout = Case == TEXT("TimeoutRetry");
+    const FString Slot = TEXT("Delivery-") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    StartListenSession(TEXT("/Game/Demo/TwoDeliveryRooms"), Slot);
+    Steps(TEXT("activate a fresh delivery from the client"), [this, S, bTimeout]
+    {
+        if (!S->Connect() || !S->ClientA.DeliveryAt(0, TEXT("Dispatch"), 1, 0)) return false;
+        if (bTimeout)
+        {
+            FAngelIOValue Timeout;
+            Timeout.Type = EAngelIOType::Float;
+            Timeout.Float = 0.15f;
+            TestTrue(TEXT("Shorten only the reader deadline"), S->A.Terminal->Mission->SetInput(TEXT("Timeout"), Timeout));
+        }
+        S->Player->UseTerminal();
+        return true;
+    });
+    if (bTimeout)
+    {
+        Steps(TEXT("reader times out; player retries while the original cab is moving"), [this, S]
+        {
+            if (S->ClientA.Terminal->Mission->GetWaitingSignal() != TEXT("Retry") ||
+                !TripOutput(S->ClientA.Terminal->Mission, TEXT("Failure"), 4)) return false;
+            TestTrue(TEXT("Deadline did not end the native ride"), S->A.Lift->IsActorTickEnabled());
+            FAngelIOValue Timeout;
+            Timeout.Type = EAngelIOType::Float;
+            Timeout.Float = 8.f;
+            TestTrue(TEXT("Allow time for the in-flight ride to land"), S->A.Terminal->Mission->SetInput(TEXT("Timeout"), Timeout));
+            S->Player->UseTerminal();
+            return true;
+        });
+    }
+    else
+    {
+        Steps(TEXT("interrupt the terminal at the selected native wait"), [this, S, bDoor, bCommitted]
+        {
+            if (S->A.Terminal->Mission->GetWaitingSignal() != (bDoor ? TEXT("DoorOpen.Wait") : TEXT("LiftTrip.Wait"))) return false;
+            TestEqual(TEXT("Durable intent precedes the action"), S->A.Terminal->Mission->InspectMission().SavedStage,
+                FString(bDoor ? TEXT("Opening") : TEXT("Dispatched")));
+            if (bCommitted) S->A.Terminal->Mission->StopScript(); // Let the producer commit without advancing its caller.
+            return true;
+        });
+        if (bCommitted)
+            Steps(TEXT("native completion reached the client before ending the server"), [S, bDoor]
+            {
+                return bDoor ? S->ClientA.Door->IsOpen() : TripOutput(S->ClientA.Lift->Mission, TEXT("LastFloor"), 4);
+            });
+        EndListenSession();
+        Steps(TEXT("start a new listen world with the same disk slot"), [S, Slot]
+        {
+            S->A = {};
+            S->ClientA = {};
+            StartListenSession(TEXT("/Game/Demo/TwoDeliveryRooms"), Slot);
+            return true;
+        });
+    }
+    Steps(TEXT("confirm the durable delivery, with no repeat of committed actions"), [this, S, bDoor, bCommitted, bTimeout]
+    {
+        const int32 Rides = !bDoor && bCommitted ? 0 : 1;
+        if (!S->Connect() || !S->A.DeliveryAt(3, TEXT("Confirm"), 4, Rides) ||
+            !S->ClientA.DeliveryAt(3, TEXT("Confirm"), 4, Rides)) return false;
+        auto* World = S->A.Terminal->GetWorld();
+        TestEqual(TEXT("Recovered world issued only the necessary door command"),
+            DeliveryCalls(World, TEXT("Door.Open")), int32(bTimeout || (bDoor && !bCommitted)));
+        TestEqual(TEXT("No duplicate ride for a committed landing"), DeliveryCalls(World, TEXT("Lift.MoveTo")), Rides);
+        if (!bTimeout)
+            TestEqual(TEXT("Recovered from the interrupted intent"), S->A.Terminal->Mission->InspectMission().RestoredStage,
+                FString(bDoor ? TEXT("Opening") : TEXT("Dispatched")));
+        S->Player->UseTerminal();
+        return true;
+    });
+    Steps(TEXT("client sees the completed mission"), [S, bCommitted, bDoor]
+    {
+        return S->ClientA.DeliveryAt(4, TEXT(""), 4, !bDoor && bCommitted ? 0 : 1);
+    });
+    EndListenSession();
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Slot]
+    {
+        const FString File = FPaths::ProjectSavedDir() / TEXT("AngelIO/Checkpoints/PIE") / (TEXT("slot-") + Slot + TEXT(".sqlite3"));
+        if (!HasAnyErrors()) TestTrue(TEXT("Remove the test's isolated SQLite slot"), IFileManager::Get().Delete(*File, true));
+        return true;
+    }));
     return true;
 }
 

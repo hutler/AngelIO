@@ -14,4 +14,13 @@ public:
     bool IsInReach(const APawn* Pawn) const;
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Terminal")
     TObjectPtr<UAngelIOScriptComponent> Mission;
+
+    UPROPERTY(VisibleAnywhere, Category="Terminal")
+    TObjectPtr<class UPointLightComponent> Lamp;
+
+private:
+    UFUNCTION()
+    void UpdateLamp();
+    void BeginPlay() override;
+    void EndPlay(const EEndPlayReason::Type Reason) override;
 };

@@ -268,6 +268,12 @@ try {
   const doorScene = (await call("describe_scene", { map: "/Game/Demo/DoorRoom" })).structuredContent;
   assert(doorScene.components.some(c => c.script === "Examples/DoorTerminal.as" && c.roomTargets.Door === "RoomDoor"));
   assert(doorScene.components.some(c => c.targetName === "RoomDoor"));
+  const fullDelivery = (await call("validate_script", { script: "Examples/TerminalDelivery.as" })).structuredContent;
+  assert(fullDelivery.valid && ["Confirm", "Dispatch", "Retry"].every(name => fullDelivery.inputSignals.includes(name)));
+  const deliveryRoom = (await call("describe_scene", { map: "/Game/Demo/DeliveryRoom" })).structuredContent;
+  assert(deliveryRoom.valid && deliveryRoom.missionsChecked === 2, JSON.stringify(deliveryRoom.diagnostics));
+  assert(deliveryRoom.components.some(c => c.script === "Examples/TerminalDelivery.as" &&
+    c.roomTargets.Door === "RoomDoor" && c.roomTargets.Lift === "RoomLift"));
   assert(api.calls.some(s => s.startsWith("string LoadCheckpoint(")));
   assert(api.calls.some(s => s.startsWith("void SaveCheckpoint(")));
   const delivery = (await call("validate_script", { script: "Examples/RoomDelivery.as" })).structuredContent;

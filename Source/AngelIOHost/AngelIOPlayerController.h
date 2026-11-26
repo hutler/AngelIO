@@ -16,7 +16,7 @@ public:
     UFUNCTION(Exec)
     void UseTerminal();
     UFUNCTION(Server, Reliable, BlueprintCallable, Category="Demo")
-    void ServerUseTerminal(AAngelIORoomTerminal* Terminal);
+    void ServerUseTerminal(AAngelIORoomTerminal* Terminal, FName ExpectedInput = NAME_None);
 };
 
 UCLASS()

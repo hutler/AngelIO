@@ -144,6 +144,12 @@ namespace
         Call->SetReturnAddress(new FDoorOpenHandle(Request));
     }
 
+    void IsDoorOpen(asIScriptGeneric* Call)
+    {
+        const auto* Door = static_cast<FDoorHandle*>(Call->GetObject())->Value.Get();
+        Call->SetReturnByte(Door && Door->IsOpen());
+    }
+
     void WaitForDoor(asIScriptGeneric* Call)
     {
         AngelIO::AwaitOperation(static_cast<FDoorOpenHandle*>(Call->GetObject())->Value, TEXT("DoorOpen.Wait"));
@@ -228,6 +234,7 @@ public:
         return FDoorHandle::Register(Engine, "Door") && FDoorOpenHandle::Register(Engine, "DoorOpen") &&
             Engine.RegisterGlobalFunction("Door@ FindDoor(const string &in name)", asFUNCTION(FindDoor), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("Door", "DoorOpen@ Open()", asFUNCTION(OpenDoor), asCALL_GENERIC) >= 0 &&
+            Engine.RegisterObjectMethod("Door", "bool get_IsOpen() const property", asFUNCTION(IsDoorOpen), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("DoorOpen", "void Wait()", asFUNCTION(WaitForDoor), asCALL_GENERIC) >= 0 &&
             Engine.RegisterObjectMethod("DoorOpen", "bool get_Opened() const property", asFUNCTION(DoorOpened), asCALL_GENERIC) >= 0 &&
             FLiftHandle::Register(Engine, "Lift") && FTripHandle::Register(Engine, "LiftTrip") &&

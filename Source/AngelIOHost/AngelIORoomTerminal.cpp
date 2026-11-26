@@ -1,6 +1,7 @@
 #include "AngelIORoomTerminal.h"
 #include "AngelIOScriptComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Pawn.h"
 #include "UObject/ConstructorHelpers.h"
@@ -24,6 +25,32 @@ AAngelIORoomTerminal::AAngelIORoomTerminal()
     Mission = CreateDefaultSubobject<UAngelIOScriptComponent>(TEXT("Mission"));
     Mission->Script = TEXT("Examples/DoorTerminal.as");
     Mission->RoomTargets.Add(TEXT("Door"), TEXT("RoomDoor"));
+    Lamp = CreateDefaultSubobject<UPointLightComponent>(TEXT("StatusLamp"));
+    Lamp->SetupAttachment(RootComponent);
+    Lamp->SetRelativeLocation(FVector(0, -18, 112));
+    Lamp->SetLightColor(FLinearColor(0.1f, 0.85f, 0.3f));
+    Lamp->SetIntensity(350.f);
+    Lamp->SetAttenuationRadius(165.f);
+    Lamp->SetVisibility(false);
+}
+
+void AAngelIORoomTerminal::BeginPlay()
+{
+    Mission->OnPublicStateChanged.AddDynamic(this, &AAngelIORoomTerminal::UpdateLamp);
+    Super::BeginPlay();
+    UpdateLamp();
+}
+
+void AAngelIORoomTerminal::EndPlay(const EEndPlayReason::Type Reason)
+{
+    Mission->OnPublicStateChanged.RemoveDynamic(this, &AAngelIORoomTerminal::UpdateLamp);
+    Super::EndPlay(Reason);
+}
+
+void AAngelIORoomTerminal::UpdateLamp()
+{
+    FAngelIOValue Value;
+    Lamp->SetVisibility(Mission->GetOutput(TEXT("Lamp"), Value) && Value.Boolean);
 }
 
 bool AAngelIORoomTerminal::IsInReach(const APawn* Pawn) const

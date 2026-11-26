@@ -6,6 +6,11 @@
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
 
+namespace
+{
+    const FString DoorStateKey = TEXT("AngelIOHost.OpenDoor.v1");
+}
+
 void FDoorOpen::Finish(bool bSuccess, const FString& Reason)
 {
     if (IsComplete()) return;
@@ -26,7 +31,7 @@ AAngelIORoomDoor::AAngelIORoomDoor()
     Leaf->SetStaticMesh(Cube.Object);
     Leaf->SetRelativeScale3D(FVector(1.8, 0.20, 2.2));
     ApplyOpening();
-    auto* Address = CreateDefaultSubobject<UAngelIOScriptComponent>(TEXT("Address"));
+    Address = CreateDefaultSubobject<UAngelIOScriptComponent>(TEXT("Address"));
     Address->bStartOnBeginPlay = false;
     Address->SetTargetName(TEXT("RoomDoor"));
 }
@@ -39,7 +44,24 @@ void AAngelIORoomDoor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 
 void AAngelIORoomDoor::BeginPlay()
 {
-    if (HasAuthority() && GetNetMode() != NM_Client) OpenFraction = 0.f;
+    if (HasAuthority() && GetNetMode() != NM_Client)
+    {
+        OpenFraction = 0.f;
+        bStateAvailable = true;
+        if (bPersistOpen)
+        {
+            TArray<uint8> State;
+            FString Error;
+            bStateAvailable = Address->LoadComponentState(DoorStateKey, State, Error) &&
+                (State.IsEmpty() || (State.Num() == 1 && State[0] == 1));
+            if (!bStateAvailable)
+            {
+                UE_LOG(LogTemp, Error, TEXT("%s cannot restore its door state: %s"), *GetPathName(), *Error);
+            }
+            else if (!State.IsEmpty())
+                OpenFraction = 1.f;
+        }
+    }
     ApplyOpening();
     Super::BeginPlay();
 }
@@ -50,6 +72,8 @@ TSharedRef<FDoorOpen> AAngelIORoomDoor::Open(FName Target)
     auto Request = MakeShared<FDoorOpen>(GetWorld(), Target, this);
     if (!HasAuthority() || GetNetMode() == NM_Client)
         Request->Finish(false, TEXT("NoAuthority"));
+    else if (!bStateAvailable)
+        Request->Finish(false, TEXT("DoorStateUnavailable"));
     else if (!HasActorBegunPlay())
         Request->Finish(false, TEXT("NotReady"));
     else if (IsOpen())
@@ -71,7 +95,16 @@ void AAngelIORoomDoor::Tick(float DeltaSeconds)
     ApplyOpening();
     if (IsOpen())
     {
-        Opening->Finish(true);
+        FString Error;
+        const uint8 Opened = 1;
+        if (bPersistOpen && !Address->SaveComponentState(DoorStateKey, MakeArrayView(&Opened, 1), Error))
+        {
+            UE_LOG(LogTemp, Error, TEXT("%s cannot save its door state: %s"), *GetPathName(), *Error);
+            OpenFraction = 0.f;
+            ApplyOpening();
+            Opening->Finish(false, TEXT("DoorSaveFailed"));
+        }
+        else Opening->Finish(true);
         Opening.Reset();
         SetActorTickEnabled(false);
         ForceNetUpdate();

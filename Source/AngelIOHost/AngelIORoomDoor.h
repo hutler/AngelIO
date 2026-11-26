@@ -5,6 +5,7 @@
 #include "AngelIORoomDoor.generated.h"
 
 class UStaticMeshComponent;
+class UAngelIOScriptComponent;
 
 struct FDoorOpen : FAngelIOOperation
 {
@@ -25,10 +26,16 @@ public:
     uint64 GetPlayGeneration() const { return PlayGeneration; }
     bool IsOpen() const { return OpenFraction == 1.f; }
 
+    UPROPERTY(EditInstanceOnly, Category="Door")
+    bool bPersistOpen = false;
+
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Door")
     TObjectPtr<UStaticMeshComponent> Leaf;
 
 private:
+    UPROPERTY()
+    TObjectPtr<UAngelIOScriptComponent> Address;
+    bool bStateAvailable = true;
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;
     void BeginPlay() override;
     void EndPlay(const EEndPlayReason::Type Reason) override;

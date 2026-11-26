@@ -34,6 +34,10 @@ Both rooms are instances of `/Game/Demo/DoorRoom`. Both terminals run the same m
 
 ## Call a typed API and wait for a trip
 
+For a complete delivery, open `/Game/Demo/TwoDeliveryRooms`. Approach a terminal and press **E** to dispatch. The terminal flashes while its door opens and its lift travels to floor 4. Press **E** again to confirm the delivery. Each room accepts one delivery per save slot. A nearby player can confirm or retry from either side of a network session. [Delivery mission](Content/AngelIO/Examples/TerminalDelivery.as)
+
+Unloading a delivered room preserves its open door, the cab's landing and the terminal's confirmation prompt. The other room can keep running throughout. If the ride wait times out, press **E** to retry. The script waits for the lift to become ready and checks the receipt for this dispatch before ordering another ride.
+
 Select a placed script component and choose a mission from the **Script** dropdown. **Mission Contract** shows each compiled input and output, its type and its source initializer. Enter an input override or clear it to use the script default. For a literal target, choose a named endpoint in the room to bind that role to the current level instance. The same panel can then drive different lifts in two copies of a room. **Tools → Validate AngelIO Missions** checks missing and ambiguous bindings before PIE.
 
 The demo game module exposes `Lift`, `LiftTrip`, and `TripResult` to AngelScript. This mission records the floor only after its own ride arrives.
