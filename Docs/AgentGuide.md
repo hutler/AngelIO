@@ -67,6 +67,12 @@ Run `AngelIO.Network.ListenServer.DoorRooms` to exercise this path. The client u
 
 ## Typed operations
 
+### Author stable save identities
+
+Select a placed script component and use **Assign Persistence Id**. The ID identifies the placement inside its template. The runtime combines it with the GUID chain of the owning level instances. A copied level instance receives its own room identity, while both instances use the same authored component ID. Copying an opted-in component in the editor assigns a new ID and clears inherited placement aliases. A named dynamic stream uses its stable package name; give persistent procedural instances repeatable names across sessions.
+
+Use **Persistence Contract** to keep a mission's save identity across script renames. **Former Placement Paths** and **Former Scripts** identify older names for migration. A placement alias is relative to its level, for example `DeliveryTerminal.Mission`. Set **Persistent Map Ids** in the plugin settings before renaming a map and carry its namespace GUID to the new package name. Run map validation before migration. `persistence_id_collision` and `persistence_alias_collision` identify both claimants. The delivery template includes authored IDs. `describe_scene` exposes the placement, resolved room, owner and contract for each opted-in component.
+
 ### Recover a two-room delivery
 
 The two instances in `/Game/Demo/TwoDeliveryRooms` share `/Game/Demo/DeliveryRoom`. The terminal binds `Door` and `Lift` locally. Keep **Persist Open** on the door, **Persist Landing** on the lift and **Request On Start** off. The three script inputs are `Floor`, `Speed` and `Timeout`. Keep the configuration fixed for the lifetime of a dispatch. [TerminalDelivery.as](../Content/AngelIO/Examples/TerminalDelivery.as)

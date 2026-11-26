@@ -50,6 +50,23 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO")
     TMap<FName, FName> RoomTargets;
 
+    // Set on a placed component before publishing a persistent mission. PIE duplicates preserve it.
+    UPROPERTY(EditInstanceOnly, Category="AngelIO|Persistence")
+    FGuid PersistenceId;
+    UPROPERTY(EditInstanceOnly, Category="AngelIO|Persistence")
+    FName PersistenceContract;
+    // Former actor.component object paths relative to this room's level.
+    UPROPERTY(EditInstanceOnly, Category="AngelIO|Persistence")
+    TArray<FString> FormerPlacementPaths;
+    UPROPERTY(EditInstanceOnly, Category="AngelIO|Persistence")
+    TArray<FString> FormerScripts;
+
+#if WITH_EDITOR
+    UFUNCTION(CallInEditor, Category="AngelIO|Persistence")
+    void AssignPersistenceId();
+    void PostEditImport() override;
+#endif
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AngelIO")
     bool bStartOnBeginPlay = true;
 

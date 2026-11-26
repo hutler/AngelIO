@@ -31,6 +31,27 @@ TArray<FString> UAngelIOScriptComponent::GetMissionScripts() const
     return Files;
 }
 
+#if WITH_EDITOR
+void UAngelIOScriptComponent::AssignPersistenceId()
+{
+    if (!IsTemplate() && !PersistenceId.IsValid())
+    {
+        Modify();
+        PersistenceId = FGuid::NewGuid();
+    }
+}
+
+void UAngelIOScriptComponent::PostEditImport()
+{
+    Super::PostEditImport();
+    if (!IsTemplate() && PersistenceId.IsValid())
+    {
+        PersistenceId = FGuid::NewGuid();
+        FormerPlacementPaths.Reset();
+    }
+}
+#endif
+
 void UAngelIOScriptComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);

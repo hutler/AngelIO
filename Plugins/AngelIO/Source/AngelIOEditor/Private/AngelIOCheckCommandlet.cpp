@@ -2,6 +2,7 @@
 #include "AngelIOProgram.h"
 #include "AngelIOMapValidation.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIOPersistenceIdentity.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
 #include "FileHelpers.h"
@@ -93,6 +94,14 @@ int32 CheckMap(const FString& Map, const FString& Output, bool bDescribe)
             auto Bindings = MakeShared<FJsonObject>();
             for (const auto& Pair : Component->RoomTargets) Bindings->SetStringField(Pair.Key.ToString(), Pair.Value.ToString());
             Json->SetObjectField(TEXT("roomTargets"), Bindings);
+            if (Component->PersistenceId.IsValid() && Component->GetWorld())
+            {
+                const auto Identity = FAngelIOPersistenceIdentity::From(*Component);
+                Json->SetStringField(TEXT("placementId"), Identity.Placement.ToString(EGuidFormats::DigitsWithHyphensLower));
+                Json->SetStringField(TEXT("persistentRoom"), Identity.Room);
+                Json->SetStringField(TEXT("persistentOwner"), Identity.Owner);
+                Json->SetStringField(TEXT("missionContract"), Identity.MissionKey(*Component, Component->Script));
+            }
             auto Inputs = MakeShared<FJsonObject>();
             for (const auto& Pair : Component->InitialInputs)
             {

@@ -6,6 +6,7 @@
 #include "../AngelIORoomDoor.h"
 #include "../AngelIORoomTerminal.h"
 #include "AngelIOScriptAPI.h"
+#include "AngelIOPersistenceIdentity.h"
 #include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTargetRegistry.h"
@@ -313,6 +314,7 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
         TWeakObjectPtr<AAngelIORoomPlayerController> Player;
         TWeakObjectPtr<APawn> RemotePawn;
         FGuid ARun, BRun, ACheckpoint;
+        FString AOwner;
         TStrongObjectPtr<UAngelIOTestSignalObserver> ClientMotion{NewObject<UAngelIOTestSignalObserver>()};
         bool Approached(const FDoorRoomView& Room, float Direction) const
         {
@@ -339,6 +341,7 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
         if (!S->RemotePawn.IsValid() || !S->Player.IsValid() || !S->ClientA.Terminal->IsInReach(S->Player->GetPawn())) return false;
         S->ARun = S->A.Terminal->Mission->InspectMission().Instance;
         S->BRun = S->B.Terminal->Mission->InspectMission().Instance;
+        S->AOwner = FAngelIOPersistenceIdentity::From(*S->A.Terminal->Mission).Owner;
         Observe(S->ClientA.Lift->Mission, S->ClientMotion.Get());
         S->Player->UseTerminal();
         return true;
@@ -384,6 +387,10 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
             !S->B.DeliveryAt(3, TEXT("Confirm"), 4, 1) || !S->ClientB.DeliveryAt(3, TEXT("Confirm"), 4, 1)) return false;
         const auto A = S->A.Terminal->Mission->InspectMission();
         const auto B = S->B.Terminal->Mission->InspectMission();
+        const auto KeyA = FAngelIOPersistenceIdentity::From(*S->A.Terminal->Mission);
+        const auto KeyB = FAngelIOPersistenceIdentity::From(*S->B.Terminal->Mission);
+        TestTrue(TEXT("A retained its stable address; B shares the template but has its own room instance"), KeyA.Placement.IsValid() &&
+            KeyA.Placement == KeyB.Placement && KeyA.Room != KeyB.Room && KeyA.Owner == S->AOwner && KeyA.Owner != KeyB.Owner);
         TestEqual(TEXT("A reads its Delivered checkpoint"), A.RestoredStage, FString(TEXT("Delivered")));
         TestTrue(TEXT("Replacement VM retains A's checkpoint"), A.Instance != S->ARun && A.CheckpointId == S->ACheckpoint && A.CheckpointId.IsValid());
         TestTrue(TEXT("B keeps its original VM and independent checkpoint"), B.Instance == S->BRun && B.CheckpointId != A.CheckpointId);

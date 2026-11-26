@@ -13,4 +13,8 @@ public:
     // Retained bytecode cache memory per authority world. Zero disables caching.
     UPROPERTY(Config, EditAnywhere, Category="Missions", meta=(ClampMin="0", DisplayName="Bytecode Cache Budget (KiB)"))
     int32 BytecodeCacheBudgetKiB = 256;
+
+    // Assign the same namespace to the old and new package names when renaming a persistent map.
+    UPROPERTY(Config, EditAnywhere, Category="Persistence")
+    TMap<FName, FGuid> PersistentMapIds;
 };

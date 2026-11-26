@@ -1,5 +1,6 @@
 #include "AngelIOMapValidation.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIOPersistenceIdentity.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
 #include "GameMapsSettings.h"
@@ -69,9 +70,25 @@ FAngelIOMapReport AngelIO::ValidateMap(UWorld& World)
     }
 
     TMap<FString, TSharedPtr<FAngelIOProgram>> Programs;
+    TMap<FString, const UAngelIOScriptComponent*> Placements, Aliases;
     Report.Components = Missions;
     for (const auto* Mission : Missions)
     {
+        if (Mission->GetWorld() == &World && Mission->GetOwner())
+        {
+            const auto Identity = FAngelIOPersistenceIdentity::From(*Mission);
+            auto Register = [&](auto& Seen, const FString& Key, const TCHAR* Code)
+            {
+                if (const auto* Previous = Seen.Find(Key))
+                    Report.Diagnostics.Add({Code, TEXT("error"), FString::Printf(TEXT("%s and %s claim %s"),
+                        *(*Previous)->GetPathName(), *Mission->GetPathName(), *Key), Mission, TEXT("PersistenceId")});
+                else Seen.Add(Key, Mission);
+            };
+            if (Identity.Placement.IsValid())
+                Register(Placements, Identity.Map + TEXT("|") + Identity.Owner, TEXT("persistence_id_collision"));
+            for (const FString& Path : Identity.LegacyOwners)
+                Register(Aliases, Identity.LegacyMap + TEXT("|") + Path, TEXT("persistence_alias_collision"));
+        }
         if (Mission->Script.IsEmpty() && !Mission->bStartOnBeginPlay && Mission->InitialInputs.IsEmpty()) continue;
         ++Report.MissionsChecked;
         auto Error = [&](FString Code, FString Field, FString Message, int32 Line = 0)
