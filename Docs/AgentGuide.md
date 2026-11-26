@@ -309,6 +309,23 @@ if ($LASTEXITCODE -ne 0) { throw 'MCP smoke test failed' }
 
 These figures include actor creation and editor tracing. The memory delta reflects process allocation and reuse. With 1000 waiting missions the additional tick cost was about 0.32 ms. Keep the current tick model for this workload.
 
+#### Mixed waits, saves and network baseline
+
+Run `AngelIO.Performance.MixedWaits+AngelIO.Network.ListenServer.DeliveryProfile` together in one Development Editor process with `-nullrhi -AngelIOProfileAllocator`. Start with no other editor process. The allocator option instruments live AngelScript CRT allocations from process startup. Its counter excludes Unreal objects and the bytecode cache. RSS measures the whole process. Each test creates its own world and slot.
+
+The 0.13.0 reference run used UE 5.8.4 on Win64, a Ryzen 9 7845HX and 63.2 GiB RAM. MixedWaits sends 24 bursts to 192 missions, split evenly among timer, missing-target deadline, and signal-plus-child cases. Each burst is followed by ten 60 Hz simulated world ticks. It verifies all 4,608 deliveries. Network measurements use the playable two-room map, a listen host and one loopback client. Packet rates include Unreal traffic on the connection.
+
+| Interval (ms) | Samples | p50 | p95 | p99 | Max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed world tick | 240 | 0.159 | 2.698 | 3.300 | 3.850 |
+| Synchronous signal fanout | 24 | 4.662 | 6.055 | 7.080 | 7.080 |
+| Deadline to observed resume, game time | 24 | 8.333 | 8.333 | 8.333 | 8.333 |
+| Warm SQLite write | 64 | 4.733 | 4.922 | 4.984 | 4.984 |
+| Listen world tick, wall time | 165 | 0.519 | 0.849 | 0.946 | 1.023 |
+| Editor frame interval, including both worlds | 164 | 15.017 | 16.585 | 21.157 | 21.331 |
+
+The first SQLite write including schema creation took 25.040 ms. The workload had 256 contexts and a peak of one queued output per component. Live SDK allocation grew by 3,363,070 bytes and process RSS by 3,850,240 bytes. Both deliveries reached the client in 2.112 s, with 4,272 B/s received and 3,296 B/s sent. The benchmark uses fixed mission counts and local disk. Compare future runs on the same machine and use a production game's own workload to set its budgets.
+
 #### Where startup time goes
 
 `AngelIO.Performance.MissionStartup` starts 1000 actors running `Examples/TimedGate.as` through component registration and `BeginPlay`. Each mission gets its own AngelScript engine, module, globals and execution context. The source cohort builds every module. In the bytecode cohort the first mission builds and saves the module with debug information (471 bytes in this run), then the other 999 load those bytes from memory. Both cohorts read the file, register the same native API and inspect the mission contract on every start.

@@ -8,6 +8,9 @@
 #include "Net/UnrealNetwork.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+#include "Tests/AngelIOStartupProbe.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogAngelIO, Log, All);
 
@@ -208,6 +211,9 @@ FString UAngelIOScriptComponent::GetWaitingSignal() const
 void UAngelIOScriptComponent::FlushEvents()
 {
     Pending.Append(Program->TakeEvents());
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
+    if (auto* Peak = FAngelIOStartupProbe::QueuePeak) *Peak = FMath::Max(*Peak, Pending.Num());
+#endif
     if (bDispatching) return;
     DispatchPendingEvents();
     PublishState();

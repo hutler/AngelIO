@@ -21,6 +21,9 @@ struct ANGELIO_API FAngelIOStartupProbe
     int64 PayloadBytes() const;
     static TWeakPtr<FAngelIORegisteredEngine> WorldEngine(UWorld* World);
     static int32 WorldModuleCount(UWorld* World);
+    // Editor-only measurements. -AngelIOProfileAllocator must precede creation of the first VM.
+    static int64 LiveSDKBytes();
+    static int32* QueuePeak;
 
     static void Mark(uint64 FAngelIOStartupProbe::* Field)
     {

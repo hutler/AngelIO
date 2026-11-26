@@ -24,6 +24,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
 #include "Engine/Level.h"
+#include "Engine/NetConnection.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
@@ -410,6 +411,80 @@ bool FAngelIOTwoRoomDelivery::RunTest(const FString&)
     {
         if (!S->ClientA.DeliveryAt(4, TEXT(""), 4, 0) || !S->A.DeliveryAt(4, TEXT(""), 4, 0)) return false;
         TestEqual(TEXT("Confirmation never issues another ride"), DeliveryCalls(FindPeer(NM_ListenServer), TEXT("Lift.MoveTo")), 2);
+        return true;
+    });
+    EndListenSession();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAngelIODeliveryProfile, "AngelIO.Network.ListenServer.DeliveryProfile",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FAngelIODeliveryProfile::RunTest(const FString&)
+{
+    struct FSample
+    {
+        FDoorRoomView A, B, ClientA, ClientB;
+        TWeakObjectPtr<UNetConnection> Connection;
+        FDelegateHandle Begin, End;
+        double Tick = 0, Start = 0;
+        int32 Received = 0, Sent = 0;
+        TArray<double> HostMs, FrameMs;
+        ~FSample()
+        {
+            FWorldDelegates::OnWorldTickStart.Remove(Begin);
+            FWorldDelegates::OnWorldTickEnd.Remove(End);
+        }
+    };
+    auto S = MakeShared<FSample>();
+    StartListenSession(TEXT("/Game/Demo/TwoDeliveryRooms"));
+    const auto Steps = ListenSteps(this);
+    Steps(TEXT("profile the host and loopback client during two concurrent deliveries"), [S]
+    {
+        auto* Host = FindPeer(NM_ListenServer);
+        auto* Client = FindPeer(NM_Client);
+        if (!S->A.Resolve(Host, 0) || !S->B.Resolve(Host, 850) || !S->ClientA.Resolve(Client, 0) ||
+            !S->ClientB.Resolve(Client, 850) || !S->ClientB.DeliveryAt(0, TEXT("Dispatch"), 1, 0) ||
+            !S->ClientA.DeliveryAt(0, TEXT("Dispatch"), 1, 0)) return false;
+        auto* PC = Cast<AAngelIORoomPlayerController>(Client->GetFirstPlayerController());
+        if (!PC || !S->ClientA.Terminal->IsInReach(PC->GetPawn()) || !PC->GetNetConnection()) return false;
+        S->Connection = PC->GetNetConnection();
+        S->Received = S->Connection->InTotalBytes;
+        S->Sent = S->Connection->OutTotalBytes;
+        S->Start = FPlatformTime::Seconds();
+        // Delegate lifetime is bounded by the latent test state on success, failure and PIE teardown.
+        S->Begin = FWorldDelegates::OnWorldTickStart.AddLambda([Sample=&S.Get(), Host](UWorld* W, ELevelTick, float)
+        {
+            if (W != Host) return;
+            const double Now = FPlatformTime::Seconds();
+            if (Sample->Tick) Sample->FrameMs.Add((Now - Sample->Tick) * 1000);
+            Sample->Tick = Now;
+        });
+        S->End = FWorldDelegates::OnWorldTickEnd.AddLambda([Sample=&S.Get(), Host](UWorld* W, ELevelTick, float)
+        {
+            if (W == Host && Sample->Tick) Sample->HostMs.Add((FPlatformTime::Seconds() - Sample->Tick) * 1000);
+        });
+        PC->UseTerminal();
+        S->B.Terminal->Mission->SendSignal(TEXT("Dispatch"), 0);
+        return true;
+    });
+    Steps(TEXT("sample up to replicated arrival and report percentiles"), [this, S]
+    {
+        if (!S->ClientA.DeliveryAt(3, TEXT("Confirm"), 4, 1) || !S->ClientB.DeliveryAt(3, TEXT("Confirm"), 4, 1)) return false;
+        const double Elapsed = FPlatformTime::Seconds() - S->Start;
+        for (auto* Samples : {&S->HostMs, &S->FrameMs})
+        {
+            if (!TestTrue(TEXT("Recorded completed host frames"), !Samples->IsEmpty())) return true;
+            Samples->Sort();
+            auto P = [&](double Q) { return (*Samples)[FMath::CeilToInt(Q * Samples->Num()) - 1]; };
+            AddInfo(FString::Printf(TEXT("AngelIO mixed %s n=%d p50=%.4f p95=%.4f p99=%.4f max=%.4f ms"),
+                Samples == &S->HostMs ? TEXT("listen_world_tick") : TEXT("editor_frame_interval"),
+                Samples->Num(), P(.50), P(.95), P(.99), Samples->Last()));
+        }
+        const int32 In = S->Connection->InTotalBytes - S->Received;
+        const int32 Out = S->Connection->OutTotalBytes - S->Sent;
+        TestTrue(TEXT("Both traffic directions measured"), In > 0 && Out > 0);
+        AddInfo(FString::Printf(TEXT("AngelIO mixed delivery_wall_ms=%.2f client_rx_Bps=%.1f client_tx_Bps=%.1f"),
+            Elapsed * 1000, In / Elapsed, Out / Elapsed));
         return true;
     });
     EndListenSession();
