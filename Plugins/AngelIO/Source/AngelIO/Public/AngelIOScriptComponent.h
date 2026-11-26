@@ -114,6 +114,8 @@ public:
     void ReportPersistedInteger(EAngelIOStateChange Change, const FString& Key, FName Target, const FString& Field, int32 Value);
 #if WITH_EDITOR
     FAngelIOMissionInspection InspectMission() const;
+    bool RestartValidated(FString& Result);
+    bool ResolveRunningSource(FString& Path, int32& Line) const;
 #endif
 
 protected:

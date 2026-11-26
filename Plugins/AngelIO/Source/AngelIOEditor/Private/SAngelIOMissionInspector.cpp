@@ -1,4 +1,7 @@
 #include "SAngelIOMissionInspector.h"
+#include "ISourceCodeAccessModule.h"
+#include "ISourceCodeAccessor.h"
+#include "Widgets/Input/SButton.h"
 #include "AngelIOBytecodeCacheStats.h"
 #include "AngelIOScriptComponent.h"
 #include "AngelIOTraceSubsystem.h"
@@ -218,6 +221,30 @@ void SAngelIOMissionInspector::Construct(const FArguments&)
             [ SNew(SComboButton).IsEnabled_Lambda([this]{return World.IsValid();}).OnGetMenuContent(this, &SAngelIOMissionInspector::MissionMenu)
                 .ButtonContent()[SNew(STextBlock).Text_Lambda([this]{ return FText::FromString(MissionName(Mission.Get())); })] ]
             + SVerticalBox::Slot().AutoHeight()[SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(Origin);})]
+            + SVerticalBox::Slot().AutoHeight()
+            [ SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth()[SNew(SButton).Text(FText::FromString(TEXT("Open running source")))
+                    .IsEnabled_Lambda([this]{return AuthorityMission.IsValid() && !Inspection.SourceRevision.IsEmpty();})
+                    .OnClicked_Lambda([this]
+                    {
+                        FString Path;
+                        int32 Line = 1;
+                        bool Opened = false;
+                        if (AuthorityMission.IsValid() && AuthorityMission->ResolveRunningSource(Path, Line))
+                            Opened = FModuleManager::LoadModuleChecked<ISourceCodeAccessModule>("SourceCodeAccess").GetAccessor().OpenFileAtLine(Path, Line);
+                        ActionResult = Opened ? FString() : FString::Printf(TEXT("Open %s at line %d in your source editor."), *Path, Line);
+                        return FReply::Handled();
+                    })]
+                + SHorizontalBox::Slot().AutoWidth()[SNew(SButton).Text(FText::FromString(TEXT("Validate and restart")))
+                    .IsEnabled_Lambda([this]{return AuthorityMission.IsValid() && !Inspection.Script.IsEmpty();})
+                    .OnClicked_Lambda([this]
+                    {
+                        if (AuthorityMission.IsValid()) AuthorityMission->RestartValidated(ActionResult);
+                        Refresh();
+                        return FReply::Handled();
+                    })] ]
+            + SVerticalBox::Slot().AutoHeight()[SNew(STextBlock).AutoWrapText(true)
+                .Text_Lambda([this]{return FText::FromString(ActionResult);})]
             + SVerticalBox::Slot().AutoHeight().Padding(0,8,0,1)
             [ SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Bold", 13)).Text_Lambda([this]{return FText::FromString(Location);}) ]
             + SVerticalBox::Slot().AutoHeight()[SNew(STextBlock).AutoWrapText(true).Text_Lambda([this]{return FText::FromString(Wait);})]
@@ -313,6 +340,7 @@ void SAngelIOMissionInspector::SelectWorld(TWeakObjectPtr<UWorld> Value)
 
 void SAngelIOMissionInspector::SelectMission(TWeakObjectPtr<UAngelIOScriptComponent> Value)
 {
+    ActionResult.Reset();
     Mission = Value;
     AuthorityMission.Reset();
     PinnedId.Reset();

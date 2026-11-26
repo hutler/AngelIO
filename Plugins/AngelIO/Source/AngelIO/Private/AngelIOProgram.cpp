@@ -15,6 +15,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
+#include "HAL/FileManager.h"
+#include "Hash/Blake3.h"
 #include <string_view>
 #include <algorithm>
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
@@ -57,6 +59,7 @@ namespace
         TSharedPtr<FJsonObject> WaitSite;
         FString Label;
 #if WITH_EDITOR
+        FString SourceRevision;
         int32 WaitLine = 0;
 #endif
     };
@@ -106,6 +109,9 @@ namespace
         const FMissionFrame Frame(*Context);
         Site->SetNumberField(TEXT("line"), Frame.Line);
         if (Frame.Section) Site->SetStringField(TEXT("script"), UTF8_TO_TCHAR(Frame.Section));
+#if WITH_EDITOR
+        Site->SetStringField(TEXT("sourceRevision"), Scope->SourceRevision);
+#endif
         if (auto* Function = Context->GetFunction(Frame.Index))
             Site->SetStringField(TEXT("function"), UTF8_TO_TCHAR(Function->GetDeclaration()));
         if (auto* Component = Scope->Component.Get())
@@ -275,6 +281,9 @@ struct FAngelIORegisteredEngine
     FAngelIOModuleBindings Bindings;
     TArray<FString> Declarations;
     uint64 NextModule = 0;
+#if WITH_EDITOR
+    TMap<FString,TWeakPtr<const FString>> RevisionTexts;
+#endif
 
     FAngelIORegisteredEngine(asIScriptEngine* InEngine, UWorld& World) : Engine(InEngine), Cache(World) {}
     ~FAngelIORegisteredEngine() { Engine->ShutDownAndRelease(); }
@@ -341,6 +350,7 @@ struct FAngelIOProgram::FImpl
     int32 RestoredVersion = 0;
 #if WITH_EDITOR
     FString RestoredStage;
+    TSharedPtr<const FString> CompiledText;
     TArray<FAngelIOLiteralTarget> LiteralTargets;
 
     // Display the initializer without executing game-module code in the editor.
@@ -640,6 +650,9 @@ struct FAngelIOProgram::FImpl
         Child->Inputs = Self->Inputs;
         Child->Outputs = Self->Outputs;
         Child->ScriptSection = Self->ScriptSection;
+#if WITH_EDITOR
+        Child->Scope.SourceRevision = Self->Scope.SourceRevision;
+#endif
         Child->Scope.Component = Self->Scope.Component;
         Child->Scope.World = Self->Scope.World;
         Child->Scope.InstanceId = Self->Scope.InstanceId;
@@ -1086,6 +1099,20 @@ bool FAngelIOProgram::Compile(const FString& Label, const FString& Source, UWorl
         S.ExternalAPI.Add(Wrapper.Declaration);
     }
     FTCHARToUTF8 SourceBytes(*Source);
+#if WITH_EDITOR
+    S.Scope.SourceRevision = LexToString(FBlake3::HashBuffer(SourceBytes.Get(), SourceBytes.Length()));
+    if (S.SharedEngine)
+    {
+        auto& Revisions = S.SharedEngine->RevisionTexts;
+        if (Revisions.Num() >= 64 && Revisions.Num() % 64 == 0)
+            for (auto It = Revisions.CreateIterator(); It; ++It)
+                if (!It.Value().IsValid()) It.RemoveCurrent();
+        auto& Entry = Revisions.FindOrAdd(S.Scope.SourceRevision);
+        S.CompiledText = Entry.Pin();
+        if (!S.CompiledText) Entry = S.CompiledText = MakeShared<FString>(Source);
+    }
+    else S.CompiledText = MakeShared<FString>(Source);
+#endif
     auto* Cache = S.SharedEngine ? &S.SharedEngine->Cache : nullptr;
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
     // The historical paired benchmarks explicitly select their own source/bytecode path.
@@ -1305,6 +1332,7 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     FAngelIOMissionInspection Info;
     Info.State = Impl->Status;
     Info.Script = Impl->ScriptSection;
+    Info.SourceRevision = Impl->Scope.SourceRevision;
     Info.Instance = Impl->Scope.InstanceId;
     Info.RestoredStage = Impl->RestoredStage;
     Info.RestoredVersion = Impl->RestoredVersion;
@@ -1322,5 +1350,26 @@ FAngelIOMissionInspection FAngelIOProgram::InspectMission() const
     if (Impl->Scope.Pending) Info.Operation = Impl->Scope.Pending->GetOperationId();
     Info.Line = Impl->Scope.WaitLine;
     return Info;
+}
+
+bool FAngelIOProgram::ResolveRunningSource(FString& Path, int32& Line) const
+{
+    if (!Impl->CompiledText || Impl->Scope.SourceRevision.IsEmpty()) return false;
+    Line = FMath::Max(1, Impl->Scope.WaitLine);
+    const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("AngelIO"));
+    Path = FPaths::ConvertRelativePathToFull(Root, Impl->ScriptSection);
+    FString Text;
+    if (FPaths::CollapseRelativeDirectories(Path) && FPaths::IsUnderDirectory(Path, Root) &&
+        FFileHelper::LoadFileToString(Text, *Path) && Text.Equals(*Impl->CompiledText, ESearchCase::CaseSensitive)) return true;
+    const FString Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("AngelIO/SourceRevisions"));
+    Path = Directory / (Impl->Scope.SourceRevision + TEXT(".as"));
+    auto& Files = IFileManager::Get();
+    if (!Files.MakeDirectory(*Directory, true)) return false;
+    if (FFileHelper::LoadFileToString(Text, *Path)) return Text.Equals(*Impl->CompiledText, ESearchCase::CaseSensitive);
+    const FString Temp = Path + TEXT(".") + FGuid::NewGuid().ToString();
+    ON_SCOPE_EXIT { Files.Delete(*Temp); };
+    if (!FFileHelper::SaveStringToFile(*Impl->CompiledText, *Temp, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)) return false;
+    return Files.Move(*Path, *Temp, false) ||
+        (FFileHelper::LoadFileToString(Text, *Path) && Text.Equals(*Impl->CompiledText, ESearchCase::CaseSensitive));
 }
 #endif

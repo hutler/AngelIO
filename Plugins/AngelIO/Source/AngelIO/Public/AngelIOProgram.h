@@ -85,6 +85,7 @@ struct FAngelIOMissionInspection
     FGuid Operation;
     FGuid CheckpointId;
     FString SavedStage, RestoredStage;
+    FString SourceRevision;
     int32 SavedVersion = 0, RestoredVersion = 0;
     TMap<FGuid, FAngelIOInspectedInteger> PersistedIntegers;
     TArray<FString> BranchWaits;
@@ -119,6 +120,7 @@ public:
     FString WaitingFor() const;
 #if WITH_EDITOR
     FAngelIOMissionInspection InspectMission() const;
+    bool ResolveRunningSource(FString& Path, int32& Line) const;
     const TArray<FAngelIOLiteralTarget>& LiteralTargets() const;
 #endif
 

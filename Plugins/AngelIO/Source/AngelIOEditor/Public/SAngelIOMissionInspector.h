@@ -52,5 +52,6 @@ private:
     int64 HistoryRevision = -1;
     int64 Dropped = 0;
     FString PinnedId, DisplayedId;
+    FString ActionResult;
     FString Origin, Location, Wait, OperationLabel, Timeline;
 };

@@ -2,6 +2,7 @@
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOTargetRegistry.h"
 #include "AngelIOTraceSubsystem.h"
+#include "AngelIOScriptAPI.h"
 #include "Dom/JsonObject.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -241,6 +242,50 @@ void UAngelIOScriptComponent::FlushEvents()
 }
 
 #if WITH_EDITOR
+bool UAngelIOScriptComponent::ResolveRunningSource(FString& Path, int32& Line) const
+{
+    return Program && Program->ResolveRunningSource(Path, Line);
+}
+
+bool UAngelIOScriptComponent::RestartValidated(FString& Result)
+{
+    if (!CanRunMission() || bDispatching || !HasBegunPlay()) { Result = TEXT("Select a live authority mission between dispatches."); return false; }
+    const auto Before = InspectMission();
+    auto Args = MakeShared<FJsonObject>();
+    Args->SetStringField(TEXT("oldRunId"), Before.Instance.ToString(EGuidFormats::DigitsWithHyphensLower));
+    Args->SetStringField(TEXT("oldRevision"), Before.SourceRevision);
+    Args->SetStringField(TEXT("waitDisposition"), Before.Operation.IsValid() ? TEXT("detach reader; producer continues") : TEXT("release script waits"));
+    if (Before.Operation.IsValid()) Args->SetStringField(TEXT("oldOperationId"), Before.Operation.ToString(EGuidFormats::DigitsWithHyphensLower));
+    struct FRestart : FAngelIOOperation { using FAngelIOOperation::FAngelIOOperation; using FAngelIOOperation::MarkComplete; };
+    FRestart Restart(GetWorld(), TEXT("Mission.Restart"), Script, Args, this);
+    auto Candidate = MakeShared<FAngelIOProgram>();
+    if (!Candidate->CompileFile(Script, GetWorld()))
+    {
+        Result.Reset();
+        for (const auto& D : Candidate->Diagnostics()) Result += FString::Printf(TEXT("%s:%d %s\n"), *Script, D.Line, *D.Message);
+        Restart.MarkComplete(TEXT("Rejected"), Result);
+        return false;
+    }
+    for (const auto& Entry : InitialInputs)
+        if (!Candidate->Ports().ContainsByPredicate([&](const auto& P){ return P.bInput && P.Name == Entry.Key && P.Type == Entry.Value.Type; }))
+        {
+            Result = TEXT("Invalid initial input: ") + Entry.Key;
+            Restart.MarkComplete(TEXT("Rejected"), Result);
+            return false;
+        }
+    Pending.Reset();
+    ReleaseProgram();
+    Program = Candidate;
+    const bool Started = Candidate->Start(InitialInputs, GetWorld(), this);
+    if (Program != Candidate) { Result = TEXT("Mission replaced during startup"); Restart.MarkComplete(TEXT("Replaced"), Result); return false; }
+    if (Started) FlushEvents();
+    else { ReportErrors(); PublishState(); }
+    const bool Success = Started && Program == Candidate && Candidate->State() != EAngelIOState::Failed;
+    Result = Success ? TEXT("Restarted from the mission entry point.") : TEXT("New mission failed during startup.");
+    Restart.MarkComplete(Success ? TEXT("Restarted") : TEXT("Failed"), Result);
+    return Success;
+}
+
 FAngelIOMissionInspection UAngelIOScriptComponent::InspectMission() const
 {
     auto Info = Program ? Program->InspectMission() : FAngelIOMissionInspection{};
