@@ -3,6 +3,7 @@
 #include "AngelIOCheckpointSubsystem.h"
 #include "AngelIOScriptAPI.h"
 #include "AngelIOScriptComponent.h"
+#include "AngelIOTasks.h"
 #include "AngelIOScriptWorldSubsystem.h"
 #include "AngelIOTraceSubsystem.h"
 #include "Components/ActorComponent.h"
@@ -172,6 +173,19 @@ void FAngelIOOperation::MarkComplete(const FString& Status, const FString& Reaso
         Event->SetStringField(TEXT("status"), Status);
         if (!Reason.IsEmpty()) Event->SetStringField(TEXT("reason"), Reason);
     }
+}
+
+FGuid AngelIOTasks::ActiveMission()
+{
+    auto* C = asGetActiveContext();
+    auto* S = C ? static_cast<FExecutionScope*>(C->GetUserData(ExecutionKey)) : nullptr;
+    return S ? S->InstanceId : FGuid();
+}
+FGuid AngelIOTasks::ActiveId()
+{
+    auto* C = asGetActiveContext();
+    auto* S = C ? static_cast<FExecutionScope*>(C->GetUserData(ExecutionKey)) : nullptr;
+    return S && S->BranchId.IsValid() ? S->BranchId : ActiveMission();
 }
 
 UWorld* AngelIO::GetScriptWorld()
@@ -446,6 +460,8 @@ struct FAngelIOProgram::FImpl
     int32 BudgetLine = 0;
     bool bInRun = false;
     FImpl* Root = nullptr;
+    TSharedPtr<AngelIOTasks::FRecord> Task;
+    bool bHasOwnedTasks = false;
     int32 ChildCount = 0;
     TArray<TSharedPtr<FImpl>> Children;
     struct FSignalNameKeyFuncs : DefaultKeyFuncs<FString>
@@ -472,6 +488,7 @@ struct FAngelIOProgram::FImpl
 
     ~FImpl()
     {
+        if (Task) Task->Finish(AngelIOTasks::EStatus::Cancelled, TEXT("OwnerEnded"));
         Children.Reset();
         if (Scope.WaitOutcome) *Scope.WaitOutcome = EAngelIOWaitOutcome::Detached;
         if (Scope.Pending && Scope.WaitSite)
@@ -489,6 +506,7 @@ struct FAngelIOProgram::FImpl
 
     bool Fail(FString Message, int32 Line = 0, int32 Column = 0)
     {
+        if (Task) Task->Finish(AngelIOTasks::EStatus::Failed, FString::Printf(TEXT("%s:%d: %s"), *ScriptSection, Line, *Message));
         Messages.Add({TEXT("error"), MoveTemp(Message), Line, Column});
         Status = EAngelIOState::Failed;
         Waiting.Reset();
@@ -603,6 +621,7 @@ struct FAngelIOProgram::FImpl
 
     static void Fork(asIScriptGeneric* Call)
     {
+        const bool bTask = Call->GetArgCount() == 2;
         auto* Ctx = asGetActiveContext();
         auto* Self = static_cast<FImpl*>(Ctx->GetUserData());
         auto* Fn = static_cast<asIScriptFunction*>(Call->GetArgObject(0));
@@ -624,15 +643,26 @@ struct FAngelIOProgram::FImpl
         Child->Scope.Component = Self->Scope.Component;
         Child->Scope.World = Self->Scope.World;
         Child->Scope.InstanceId = Self->Scope.InstanceId;
-        Child->Scope.BranchId = FGuid::NewGuid();
         Child->Scope.CheckpointStepId = Self->Scope.CheckpointStepId;
         Child->BranchName = UTF8_TO_TCHAR(Fn->GetName());
+        if (bTask)
+        {
+            Root->bHasOwnedTasks = true;
+            Child->Task = MakeShared<AngelIOTasks::FRecord>(Self->Scope.World.Get(), Child->BranchName, Self->Scope.InstanceId,
+                AngelIOTasks::ActiveId(), static_cast<int32>(Call->GetArgDWord(1)), Self->Scope.Component.Get());
+        }
+        Child->Scope.BranchId = bTask ? Child->Task->GetOperationId() : FGuid::NewGuid();
         Child->Context = Self->Engine->CreateContext();
         if (!Child->Context || Child->Context->Prepare(Fn) < 0) { Ctx->SetException("Cannot prepare child branch"); return; }
+        if (bTask)
+        {
+            Child->Context->SetArgDWord(0, Call->GetArgDWord(1));
+            AngelIOTasks::ReturnHandle(Call, Child->Task.ToSharedRef());
+        }
         Child->Context->SetUserData(Child.Get());
         Child->Context->SetLineCallback(asFUNCTION(Line), Child.Get(), asCALL_CDECL);
         Self->Children.Add(Child);
-        if (!Child->Execute()) Ctx->SetException(TCHAR_TO_UTF8(*Child->Messages.Last().Message));
+        if (!Child->Execute() && !bTask) Ctx->SetException(TCHAR_TO_UTF8(*Child->Messages.Last().Message));
         if (Child->Status != EAngelIOState::Waiting) Self->Children.RemoveSingle(Child);
     }
     static void SignalValue(asIScriptGeneric* Call)
@@ -824,6 +854,7 @@ struct FAngelIOProgram::FImpl
 
     bool Execute()
     {
+        if (Task) Task->State = AngelIOTasks::EStatus::Running;
         Status = EAngelIOState::Running;
         Steps = 0;
         bInRun = true;
@@ -835,10 +866,14 @@ struct FAngelIOProgram::FImpl
         if (Code == asEXECUTION_FINISHED)
         {
             Status = EAngelIOState::Finished;
+            if (Task) Task->Finish(AngelIOTasks::EStatus::Succeeded, {}, static_cast<int32>(Context->GetReturnDWord()));
             Children.Reset();
         }
         else if (Code == asEXECUTION_SUSPENDED && !Waiting.IsEmpty())
+        {
             Status = EAngelIOState::Waiting;
+            if (Task && !Task->IsComplete()) Task->State = AngelIOTasks::EStatus::Waiting;
+        }
         else
         {
             if (Code == asEXECUTION_ABORTED)
@@ -861,11 +896,11 @@ struct FAngelIOProgram::FImpl
 
     bool NeedsTick() const
     {
-        return Status == EAngelIOState::Waiting && (Scope.Pending.IsValid() ||
+        return Status == EAngelIOState::Waiting && ((Task && Task->IsComplete()) || Scope.Pending.IsValid() ||
             Children.ContainsByPredicate([](const auto& Child){ return Child->NeedsTick(); }));
     }
     bool ResumeOperation();
-    bool Advance(const FString* Signal, int32 Value);
+    bool Advance(const FString* Signal, int32 Value, bool bJoinPass = false);
 };
 
 FAngelIOProgram::FAngelIOProgram() : Impl(MakeShared<FImpl>()) {}
@@ -923,6 +958,8 @@ bool FAngelIOProgram::FImpl::RegisterAPI(FAngelIOModuleBindings& Bindings)
         Engine->RegisterGlobalFunction("void Notify(const ?&in, int)", asFUNCTION(FImpl::BranchSignal), asCALL_GENERIC) < 0 ||
         Engine->SetDefaultNamespace("") < 0 ||
         Engine->RegisterFuncdef("void MissionBranch()") < 0 ||
+        !AngelIOTasks::Register(*Engine) ||
+        Engine->RegisterGlobalFunction("Task@ StartTask(MissionWork@+ entry, int argument)", asFUNCTION(FImpl::Fork), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("void Fork(MissionBranch@+ entry)", asFUNCTION(FImpl::Fork), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("void WaitSeconds(float seconds)", asFUNCTION(FImpl::WaitSeconds), asCALL_GENERIC) < 0 ||
         Engine->RegisterGlobalFunction("void SendTo(const string &in target, const string &in input, int value)", asFUNCTION(FImpl::SendTo), asCALL_GENERIC) < 0 ||
@@ -1190,14 +1227,17 @@ bool FAngelIOProgram::IsWaitingOnOperation() const
 bool FAngelIOProgram::ResumeCompletedOperation()
 {
     const auto Running = Impl;
-    return Running->Advance(nullptr, 0) && Running == Impl;
+    bool bChanged = Running->Advance(nullptr, 0);
+    if (Running == Impl && Running->bHasOwnedTasks) bChanged |= Running->Advance(nullptr, 0, true);
+    return bChanged && Running == Impl;
 }
 
-bool FAngelIOProgram::FImpl::Advance(const FString* Signal, int32 Value)
+bool FAngelIOProgram::FImpl::Advance(const FString* Signal, int32 Value, bool bJoinPass)
 {
     if (Status != EAngelIOState::Waiting) return false;
-    if (Signal && EndSignals.Contains(*Signal))
+    if ((Task && Task->IsComplete()) || (Signal && EndSignals.Contains(*Signal)))
     {
+        if (Task) Task->Finish(AngelIOTasks::EStatus::Cancelled, Signal ? *Signal : TEXT("OwnerCancelled"));
         Status = EAngelIOState::Finished;
         Children.Reset();
         return true;
@@ -1212,16 +1252,18 @@ bool FAngelIOProgram::FImpl::Advance(const FString* Signal, int32 Value)
         if (!Execute()) return false;
         bChanged = true;
     }
-    else if (!Signal && Scope.Pending) bChanged = ResumeOperation();
+    else if (!Signal && Scope.Pending && !bJoinPass && Scope.Label != TEXT("Task.Join")) bChanged = ResumeOperation();
     if (Status != EAngelIOState::Waiting) return bChanged;
     for (int32 I = 0; I < Existing; ++I)
     {
         const auto Child = Children[I];
-        bChanged |= Child->Advance(Signal, Value);
-        if (Child->Status == EAngelIOState::Failed)
+        bChanged |= Child->Advance(Signal, Value, bJoinPass);
+        if (Child->Status == EAngelIOState::Failed && !Child->Task)
             return Fail(Child->BranchName + TEXT(": ") + Child->Messages.Last().Message, Child->Messages.Last().Line);
+        bChanged |= Child->Status == EAngelIOState::Failed;
     }
-    if (bChanged) Children.RemoveAll([](const auto& Child){ return Child->Status == EAngelIOState::Finished; });
+    if (bChanged) Children.RemoveAll([](const auto& Child){ return Child->Status == EAngelIOState::Finished || Child->Status == EAngelIOState::Failed; });
+    if (bJoinPass && Scope.Pending && Scope.Label == TEXT("Task.Join")) bChanged |= ResumeOperation();
     return bChanged;
 }
 

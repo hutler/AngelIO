@@ -99,11 +99,21 @@ The reusable contract lives in `AngelIO`. The host module defines `Lift`, `LiftT
 
 Rebuild the editor after changing a binding. Check the new signature in `describe_api.externalDeclarations`, compile a small caller, then exercise the behavior. The demo result exposes `Id`, `Floor` and `Status`. Reasons such as `LiftBusy` appear in the trace's `complete` event. Use `trip.Id` or `result.Id` to correlate the outcome with the native operation's `GetOperationId()`. Two invocations on the same actor and floor still have distinct IDs.
 
-### World-owned AngelScript engine
+### Durable action receipts
 
 On first writable access to a version-zero SQLite slot, AngelIO takes a consistent snapshot beside the original using the suffix `.pre-v1`. It upgrades the schema transactionally. Inspection opens the slot read-only. For an opted-in component the store checks its current and former addresses. A single legacy match moves to the stable key with its original checkpoint ID, writer, stage and version. Conflicting matches fail. Components without an authored ID retain their legacy keys.
 
 `RequireCheckpoint(version)` returns an empty stage for a missing record and fails the mission for incompatible or corrupt data. `LoadCheckpoint` retains its earlier version-mismatch behavior. `RecordOnce("DeliveryCredit")` commits one entitlement and returns its persistent UUID on every replay. A service applying external rewards must use this UUID as its idempotency key. [Migration and interrupted grant test](../Plugins/AngelIO/Source/AngelIO/Private/Tests/AngelIOStoreTests.cpp)
+
+### Owned tasks and joins
+
+`Task@ t = StartTask(work, argument)` runs a mission function with signature `int work(int)`. It shares mission globals and belongs to the calling task or root mission. Observe `Status`, `Reason`, `Id` and `ParentId`. `TryGetResult(int &out)` succeeds only when the function returned an integer. An owned task's exception becomes a Failed result with a source location. Legacy `Fork` retains its error propagation.
+
+Use `t.Join(seconds)`, `WatchFirst(a,b,seconds)` or `WatchAll(a,b,seconds)`. A reader receives a `TaskJoin` snapshot containing `Ready`, `Index`, `First` and `Second`. Omitting the timeout waits indefinitely. Zero polls. When both tasks are terminal at the first observation, index 0 wins. A timeout affects only that reader. The owner can call `t.Cancel()`. Ending the owner also ends its children and detaches their native waits. Native producers retain control of their physical actions. Both styles of child share a limit of 64 live descendants per mission.
+
+`NextFrame()` waits for a later game tick in the same world. Paused game time leaves the caller suspended. Producer completions are processed before task joins at the same tick's deadline. [Ownership and deadline tests](../Source/AngelIOHost/Tests/AngelIOTaskTests.cpp)
+
+### World-owned AngelScript engine
 
 From v0.7.0 the first mission compiled in an authority game world registers the core and game-module bindings. Each component gets its own module, globals, context, wait state and source diagnostics. `EndPlay` discards the room's modules. Even a world with zero remaining missions keeps its registered engine until teardown. Provider registration failure leaves the world free to retry with a fresh engine.
 

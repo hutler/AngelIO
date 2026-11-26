@@ -201,6 +201,9 @@ server.registerTool("describe_api", {
       "string LoadCheckpoint(int version = 1) reads this room component's saved stage. An absent record or a version mismatch returns an empty string.",
       "string RequireCheckpoint(int version = 1) reads the saved stage. A missing row is empty and an incompatible version fails the mission.",
       "string RecordOnce(const string &in action) commits one durable action receipt per mission contract and action key and returns the same ID on replay.",
+      "Task@ StartTask(MissionWork@ entry, int argument) starts int work(int). Task exposes Status, Id, ParentId, Reason, TryGetResult(int &out), Cancel() and Join(float seconds = -1).",
+      "TaskJoin@ WatchAll(Task@ a, Task@ b, float seconds = -1) and WatchFirst return a per-reader snapshot with Ready, Index, First and Second statuses. A deadline leaves both tasks alive.",
+      "void NextFrame() suspends until this world's game clock advances.",
       "void SaveCheckpoint(const string &in stage, int version = 1) commits a non-empty stage to the host's checkpoint slot. Use a positive version. A storage error fails the mission.",
       "Emit(OutputSignal name, int value) publishes after the next suspension or return."
     ],
